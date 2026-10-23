@@ -1,0 +1,1 @@
+const {contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('login',{initialTheme:process.argv.includes('--bili-theme=dark')?'dark':'light',qr:()=>ipcRenderer.invoke('qr'),poll:key=>ipcRenderer.invoke('poll',key),close:()=>ipcRenderer.invoke('loginClose'),onWindowMotion:fn=>ipcRenderer.on('windowMotion',(_,delta)=>fn(delta))});

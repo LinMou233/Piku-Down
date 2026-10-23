@@ -1,0 +1,64 @@
+{
+  "name": "bili-desktop",
+  "version": "1.4.2",
+  "description": "Piku Down · Bilibili 视频与音频下载工具",
+  "main": "main.js",
+  "author": "@灵眸闪熠",
+  "license": "MIT",
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "qrcode": "^1.5.4"
+  },
+  "productName": "Piku Down",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.bili.desktop",
+    "productName": "Piku Down",
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/ffmpeg.exe"
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "core.js",
+      "ui/**/*",
+      "node_modules/**/*",
+      "library.js",
+      "resources/**/*",
+      "auth.js",
+      "media.js",
+      "login-preload.js",
+      "probe.js",
+      "download-task.js"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "resources/icon.ico"
+    },
+    "portable": {
+      "artifactName": "Piku-Down-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Piku-Down-Setup-${version}.exe",
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Piku Down",
+      "include": "build/installer.nsh"
+    }
+  }
+}
