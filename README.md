@@ -26,7 +26,7 @@ pnpm test
 pnpm dist
 ```
 
-允许 Electron 和 ffmpeg-static 所需的安装脚本。构建产物在 dist：Piku-Down-Setup-1.4.2.exe 为安装版，Piku-Down-1.4.2.exe 为便携版。
+允许 Electron 和 ffmpeg-static 所需的安装脚本。
 
 单元测试保留在 test，覆盖登录检查、视频标识解析、账户列表、选流、音频编码参数及取消下载清理。真实扫码、账号画质权限及联网下载需人工验证。
 
