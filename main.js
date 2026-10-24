@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session, dialog, shell, nativeImage, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, nativeImage, nativeTheme, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
@@ -8,9 +8,13 @@ const { createAuthGate } = require('./auth');
 const {frameRate,selectVideo,selectBestVideo,audioEncoding}=require('./media');
 const {inspectMedia}=require('./probe');
 const {createDownloadTask,cleanupDownloadTask}=require('./download-task');
+const {sessionFetch,abortScope}=require('./network');
+const {mediaBinary}=require('./media-binary');
+const fetchSession=(url,options)=>sessionFetch(ses,url,options,net);
+const legacyRuntime=Number(process.versions.electron.split('.')[0])<=22;let performanceMode=legacyRuntime,dragEffects=true;
 let win, ses, active, activeTask, loginWin, currentQrKey, quitting=false;
 const protectedChannels=new Set(['parse','formats','download','folder','reveal','library','history','clearHistory','saveSettings','importWallpaper']);
-function handle(name,callback){ipcMain.handle(name,async(event,...args)=>{if(protectedChannels.has(name)){if(event.sender!==win?.webContents)throw Error('无效的窗口请求');await auth.require();}return callback(event,...args);});}
+function handle(name,callback){ipcMain.handle(name,async(event,...args)=>{if(protectedChannels.has(name)){if(event.sender!==win?.webContents)throw Error('无效的窗口请求');if(name==='library')await auth.require();}return callback(event,...args);});}
 app.setName('Piku Down');
 // Keep the existing profile location across the product rename.
 app.setPath('userData',path.join(app.getPath('appData'),'bili-desktop'));
@@ -19,17 +23,16 @@ app.setAppUserModelId('local.bili.desktop');
 const headers = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.bilibili.com/' };
 async function api(url,{signal}={}) {
  signal?.throwIfAborted();
- const r = await ses.fetch(url, { headers, signal:signal?AbortSignal.any([signal,AbortSignal.timeout(15000)]):AbortSignal.timeout(15000) });
- if (!r.ok) throw Error(`网络请求失败：${r.status}`);
- let j; try { j = await r.json(); } catch { throw Error('B站返回了验证页面，请稍后重试或更换网络'); }
+ const scope=abortScope(signal,15000);let r,j;try{r=await fetchSession(url,{headers,signal:scope.signal});if(!r.ok)throw Error(`网络请求失败：${r.status}`);j=await r.json();}finally{scope.dispose();}
+
  if(j.code===-101)auth.invalidate();
  if (j.code !== 0) throw Error(`B站返回 ${j.code}：${j.message || '请求失败'}`); return j.data;
 }
 async function play(bvid,cid,qn=127,signal) { return api(`https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${Number(cid)}&qn=${Number(qn)}&fnval=4048&fourk=1`,{signal}); }
 app.whenReady().then(async () => {
- const saved=await readData('settings',defaultSettings);const initialTheme=saved.theme==='dark'?'dark':'light';nativeTheme.themeSource=initialTheme;
+ const saved=await readData('settings',defaultSettings);performanceMode=legacyRuntime||!!saved.performance;dragEffects=true;const initialTheme=saved.theme==='dark'?'dark':'light';nativeTheme.themeSource=initialTheme;
  ses = session.fromPartition('persist:bilibili');
- win = new BrowserWindow({ width:940,height:680,icon:path.join(__dirname,'resources','icon.ico'),minWidth:720,minHeight:520,frame:false,backgroundColor:initialTheme==='dark'?(saved.darkColor||'#171a24'):(saved.color||'#e7ebf2'),webPreferences:{additionalArguments:['--bili-theme='+initialTheme],preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false} });
+ win = new BrowserWindow({ width:940,height:680,icon:path.join(__dirname,'resources','icon.ico'),minWidth:720,minHeight:520,frame:false,backgroundColor:initialTheme==='dark'?(saved.darkColor||'#171a24'):(saved.color||'#e7ebf2'),webPreferences:{additionalArguments:['--bili-theme='+initialTheme,...(performanceMode?['--bili-performance']:[]),...(dragEffects?['--bili-drag-effects']:[]),...(legacyRuntime?['--bili-legacy']:[])],preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false} });
  win.setMenuBarVisibility(false); win.loadFile('ui/index.html');
  attachMotion(win);
  let closing=false;win.on('close',event=>{if(closing)return;event.preventDefault();closing=true;saveQueue.finally(()=>{if(!win.isDestroyed())win.destroy();});});
@@ -47,12 +50,12 @@ handle('authState',()=>auth.current);
 handle('openLogin',async()=>{const profile=await auth.check(true);if(!profile.logged)await ensureLoginWindow();return profile;});
 handle('qr',async(event)=>{if(event.sender!==loginWin?.webContents)throw Error('请在登录窗口扫码');const d=await api('https://passport.bilibili.com/x/passport-login/web/qrcode/generate');currentQrKey=d.qrcode_key;return {key:d.qrcode_key,image:await require('qrcode').toDataURL(d.url,{width:256,margin:2,errorCorrectionLevel:'M'})};});
 handle('poll',async(event,key)=>{if(event.sender!==loginWin?.webContents)throw Error('无效的登录窗口');if(key!==currentQrKey)return {code:86038};const data=await api('https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key='+encodeURIComponent(key));if(data.code===0){const profile=await auth.check(true);if(!profile.logged)throw Error(profile.error||'登录尚未验证，请稍后重试');}return data;});
-handle('loginClose',event=>{if(event.sender===loginWin?.webContents)app.quit();});
-handle('logout',async()=>{active?.abort();auth.invalidate();await ses.clearStorageData();await ensureLoginWindow();return true;});
-handle('folder',async()=>{const d=await dialog.showOpenDialog(win,{properties:['openDirectory','createDirectory']});return d.canceled?null:d.filePaths[0];});
+handle('loginClose',event=>{if(event.sender===loginWin?.webContents)loginWin.close();});
+handle('logout',async()=>{active?.abort();auth.invalidate();await ses.clearStorageData();if(loginWin&&!loginWin.isDestroyed())loginWin.close();return true;});
+handle('folder',async()=>{const saved=await readData('settings',defaultSettings);const d=await dialog.showOpenDialog(win,{defaultPath:saved.downloadDir||app.getPath('videos'),properties:['openDirectory','createDirectory']});if(d.canceled)return null;const downloadDir=d.filePaths[0];await updateData('settings',current=>({...current,downloadDir}));return downloadDir;});
 handle('parse',async(_,input)=>{
  let value=input.trim();
- if (/^https:\/\/b23\.tv\//i.test(value)) {const r=await ses.fetch(value,{method:'HEAD',headers});value=r.url;}
+ if (/^https:\/\/b23\.tv\//i.test(value)) {const r=await fetchSession(value,{method:'HEAD',headers});value=r.url;}
  const id=parseId(value);const d=await api(`https://api.bilibili.com/x/web-interface/view?${id}`);
  return {bvid:d.bvid,title:d.title,owner:d.owner.name,cover:d.pic,duration:d.duration,pages:d.pages.map(p=>({cid:p.cid,page:p.page,part:p.part}))};
 });
@@ -64,7 +67,7 @@ handle('formats',async(_,bvid,cid)=>{
 async function transfer(urls,file,signal,label) {
  let last;
  for(const url of urls.filter(Boolean)) {
- try {const r=await ses.fetch(url,{headers,signal});if(!r.ok)throw Error(`下载失败 ${r.status}`);
+ try {const r=await fetchSession(url,{headers,signal});if(!r.ok)throw Error(`下载失败 ${r.status}`);
  const h=await fs.open(file,'w');let received=0,lastUpdate=0;const total=Number(r.headers.get('content-length'));
  try {for await(const chunk of r.body){signal.throwIfAborted();await h.write(chunk);received+=chunk.length;if(Date.now()-lastUpdate>100){win?.webContents.send('progress',{label,received,total});lastUpdate=Date.now();}}} finally {await h.close();}return;
  }catch(e){last=e;if(signal.aborted)throw e;}
@@ -74,14 +77,14 @@ handle('cancel',()=>{active?.abort(Error('下载已取消'));});
 handle('cancelAndDelete',async event=>{if(event.sender!==win?.webContents)throw Error('无效的窗口请求');const task=activeTask;if(!task)return {cancelled:false,deleted:false};task.deleteRequested=true;task.controller.abort(Error('下载已取消'));const result=await task.done;if(result.error)throw Error(result.error);return result;});
 handle('download',async(_,opts)=>{
  if(active)throw Error('已有下载任务正在运行');
- if(!opts.folder||!path.isAbsolute(opts.folder))throw Error('请先选择下载目录');
+ if(!opts.folder)opts.folder=(await readData('settings',defaultSettings)).downloadDir||app.getPath('videos');if(!path.isAbsolute(opts.folder))throw Error('无效的下载目录');await fs.mkdir(opts.folder,{recursive:true});
  const controller=new AbortController();active=controller;const task=createDownloadTask(controller,opts.folder);activeTask=task;let temp,result,failure,cleanupError;
  try {
  const audioOnly=opts.kind==='audio';const extension=audioOnly?(opts.audioFormat==='mp3'?'mp3':'m4a'):'mp4';const d=await play(opts.bvid,opts.cid,audioOnly?80:opts.qn,controller.signal);const signal=controller.signal;
  const target=path.join(opts.folder,safeName(opts.title)+'.'+extension);task.target=target;
  try {await fs.access(target);throw Error('同名文件已存在，请更换目录或文件名');}catch(e){if(e.code!=='ENOENT')throw e;}
  temp=await fs.mkdtemp(path.join(opts.folder,'.bilidown-'));task.temp=temp;
- const ffmpeg=require('ffmpeg-static').replace('app.asar','app.asar.unpacked');
+ const ffmpeg=mediaBinary();
  let args;
  if(audioOnly){
  const audio=[...(d.dash?.audio||[])].sort((a,b)=>b.bandwidth-a.bandwidth)[0];
@@ -115,9 +118,9 @@ handle('reveal',(_,file)=>shell.showItemInFolder(file));
 let saveQueue=Promise.resolve();
 async function readData(name,fallback){try{return JSON.parse(await fs.readFile(path.join(app.getPath('userData'),name+'.json'),'utf8'));}catch{return fallback;}}
 function updateData(name,transform){const op=saveQueue.then(async()=>{const value=transform(await readData(name,name==='history'?[]:{}));const file=path.join(app.getPath('userData'),name+'.json');await fs.writeFile(file+'.tmp',JSON.stringify(value));await fs.rename(file+'.tmp',file);return value;});saveQueue=op.catch(()=>{});return op;}
-const defaultSettings={mode:'color',color:'#e7ebf2',blur:12,collapsed:false,theme:'light',darkColor:'#171a24'};
-handle('settings',()=>readData('settings',defaultSettings));
-handle('saveSettings',async(_,value)=>{const result=await updateData('settings',()=>({mode:value.mode==='wallpaper'?'wallpaper':'color',color:/^#[0-9a-f]{6}$/i.test(value.color)?value.color:'#e7ebf2',darkColor:/^#[0-9a-f]{6}$/i.test(value.darkColor)?value.darkColor:'#171a24',theme:value.theme==='dark'?'dark':'light',blur:Math.max(0,Math.min(40,Number(value.blur)||0)),collapsed:!!value.collapsed}));nativeTheme.themeSource=result.theme;win.setBackgroundColor(result.theme==='dark'?result.darkColor:result.color);return result;});
+const defaultSettings={dragEffects:true,performance:legacyRuntime,mode:'color',color:'#e7ebf2',blur:12,collapsed:false,theme:'light',darkColor:'#171a24'};
+handle('settings',async()=>{const saved=await readData('settings',defaultSettings);return {...defaultSettings,...saved,downloadDir:typeof saved.downloadDir==='string'&&path.isAbsolute(saved.downloadDir)?saved.downloadDir:app.getPath('videos')};});
+handle('saveSettings',async(_,value)=>{const result=await updateData('settings',current=>({downloadDir:typeof value.downloadDir==='string'&&path.isAbsolute(value.downloadDir)?value.downloadDir:current.downloadDir||app.getPath('videos'),dragEffects:true,performance:legacyRuntime||!!value.performance,mode:value.mode==='wallpaper'?'wallpaper':'color',color:/^#[0-9a-f]{6}$/i.test(value.color)?value.color:'#e7ebf2',darkColor:/^#[0-9a-f]{6}$/i.test(value.darkColor)?value.darkColor:'#171a24',theme:value.theme==='dark'?'dark':'light',blur:Math.max(0,Math.min(40,Number(value.blur)||0)),collapsed:!!value.collapsed}));performanceMode=result.performance;dragEffects=result.dragEffects;nativeTheme.themeSource=result.theme;win.setBackgroundColor(result.theme==='dark'?result.darkColor:result.color);return result;});
 handle('wallpaper',async()=>{try{return 'data:image/jpeg;base64,'+(await fs.readFile(path.join(app.getPath('userData'),'wallpaper.jpg'))).toString('base64');}catch{return null;}});
 handle('importWallpaper',async()=>{const result=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[{name:'背景图片',extensions:['jpg','jpeg','png','webp']}]});if(result.canceled)return null;let image=nativeImage.createFromPath(result.filePaths[0]);if(image.isEmpty())throw Error('无法读取该图片');const size=image.getSize();if(size.width>2560||size.height>1600){const scale=Math.min(2560/size.width,1600/size.height);image=image.resize({width:Math.round(size.width*scale),height:Math.round(size.height*scale)});}const bytes=image.toJPEG(85);await fs.writeFile(path.join(app.getPath('userData'),'wallpaper.jpg'),bytes);return 'data:image/jpeg;base64,'+bytes.toString('base64');});
 handle('history',()=>readData('history',[]));
@@ -135,15 +138,19 @@ const auth=createAuthGate(async()=>{
 },profile=>{
  if(win&&!win.isDestroyed())win.webContents.send('authStateChanged',profile);
  if(profile.logged){if(loginWin&&!loginWin.isDestroyed())loginWin.close();}
- else{active?.abort();if(win&&!win.isDestroyed()&&!quitting)ensureLoginWindow().catch(console.error);}
+
 });
 async function ensureLoginWindow(){
  if(quitting||!win||win.isDestroyed()||auth.current.logged)return;
  if(loginWin&&!loginWin.isDestroyed()){loginWin.show();loginWin.focus();return;}
  const saved=await readData('settings',defaultSettings);if(loginWin&&!loginWin.isDestroyed()||quitting||auth.current.logged)return;
  const theme=saved.theme==='dark'?'dark':'light';
- loginWin=new BrowserWindow({parent:win,modal:true,width:400,height:520,frame:false,resizable:false,maximizable:false,minimizable:false,movable:true,show:false,icon:path.join(__dirname,'resources','icon.ico'),backgroundColor:theme==='dark'?'#202638':'#eef1f7',title:'登录 Piku Down',webPreferences:{preload:path.join(__dirname,'login-preload.js'),additionalArguments:['--bili-theme='+theme],contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false}});
- const child=loginWin;currentQrKey=null;child.setMenuBarVisibility(false);attachMotion(child);child.webContents.setWindowOpenHandler(()=>({action:'deny'}));child.webContents.on('will-navigate',event=>event.preventDefault());child.loadFile('ui/login.html');child.once('ready-to-show',()=>{if(!child.isDestroyed()){child.show();child.focus();}});child.on('closed',()=>{if(loginWin===child)loginWin=null;if(!auth.current.logged&&!quitting)app.quit();});
+ loginWin=new BrowserWindow({parent:win,modal:true,width:400,height:520,frame:false,resizable:false,maximizable:false,minimizable:false,movable:true,show:false,icon:path.join(__dirname,'resources','icon.ico'),backgroundColor:theme==='dark'?'#202638':'#eef1f7',title:'登录 Piku Down',webPreferences:{preload:path.join(__dirname,'login-preload.js'),additionalArguments:['--bili-theme='+theme,...(performanceMode?['--bili-performance']:[]),...(dragEffects?['--bili-drag-effects']:[]),...(legacyRuntime?['--bili-legacy']:[])],contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false}});
+ const child=loginWin;currentQrKey=null;child.setMenuBarVisibility(false);attachMotion(child);child.webContents.setWindowOpenHandler(()=>({action:'deny'}));child.webContents.on('will-navigate',event=>event.preventDefault());child.loadFile('ui/login.html');child.once('ready-to-show',()=>{if(!child.isDestroyed()){child.show();child.focus();}});child.on('closed',()=>{if(loginWin===child)loginWin=null;currentQrKey=null;});
 }
-function attachMotion(window){let previous=window.getPosition(),lastSent=0;window.on('move',()=>{if(window.isDestroyed())return;const current=window.getPosition();const dx=previous[0]-current[0],dy=previous[1]-current[1];previous=current;if(Date.now()-lastSent<16)return;lastSent=Date.now();window.webContents.send('windowMotion',{dx:Math.max(-60,Math.min(60,dx)),dy:Math.max(-60,Math.min(60,dy))});});}
-
+function attachMotion(window){
+ let previous=window.getPosition(),latest=previous,queued=false,lastNativeAt=0;
+ const queue=position=>{latest=position;if(performanceMode||!dragEffects){previous=position;return;}if(queued)return;queued=true;setImmediate(()=>{queued=false;if(window.isDestroyed())return;if(performanceMode||!dragEffects){previous=latest;return;}const dx=previous[0]-latest[0],dy=previous[1]-latest[1];previous=latest;if(dx||dy)window.webContents.send('windowMotion',{dx,dy});});};
+ window.on('will-move',(_,bounds)=>{lastNativeAt=Date.now();queue([bounds.x,bounds.y]);});
+ window.on('move',()=>{if(Date.now()-lastNativeAt>40)queue(window.getPosition());});
+}
