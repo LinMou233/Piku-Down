@@ -1,3 +1,3 @@
 const {contextBridge,ipcRenderer}=require('electron');
-const names=['folder','parse','formats','settings','saveSettings','wallpaper','account','windowState','history','openLogin','logout','library'];
+const names=['folder','parse','formats','settings','saveSettings','wallpaper','account','windowState','history','openLogin','logout','library','download','cancel','cancelAndDelete','externalState','externalInstall','externalImport','externalRemember','externalClear','lastRequest'];
 contextBridge.exposeInMainWorld('bili',{initialTheme:'light',initialDragEffects:true,initialPerformance:process.argv.includes('--fixture-legacy'),legacy:process.argv.includes('--fixture-legacy'),...Object.fromEntries(names.map(name=>[name,(...args)=>ipcRenderer.invoke('fixture',name,...args)])),onAuthState(){},onWindowState(){},onProgress(){},onWindowMotion(fn){ipcRenderer.on('windowMotion',(_,delta)=>fn(delta));}});

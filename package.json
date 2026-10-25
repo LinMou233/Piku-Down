@@ -1,7 +1,7 @@
 {
   "name": "bili-desktop",
-  "version": "1.5.3",
-  "description": "Piku Down · Bilibili 视频与音频下载工具",
+  "version": "1.6.0",
+  "description": "Piku Down · Bilibili、X 与 YouTube 视频下载工具",
   "main": "main.js",
   "author": "@灵眸闪熠",
   "license": "MIT",
@@ -43,6 +43,11 @@
       "download-task.js",
       "network.js",
       "media-binary.js",
+      "external-media.js",
+      "external-runtime.js",
+      "external-auth.js",
+      "process-runner.js",
+      "user-error.js",
       "resources/icon.ico",
       "resources/icons/icon-32.png",
       "resources/icons/icon-64.png"

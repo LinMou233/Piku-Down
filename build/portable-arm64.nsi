@@ -11,10 +11,10 @@ AutoCloseWindow true
 BrandingText "Piku Down ${APP_VERSION}"
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
-VIProductVersion "${APP_VERSION}.0"
+VIProductVersion "${APP_VERSION_NUM}"
 VIAddVersionKey /LANG=2052 "ProductName" "Piku Down"
 VIAddVersionKey /LANG=2052 "FileDescription" "Piku Down ARM64 Portable"
-VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION}"
+VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION_NUM}"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "Piku Down"
 
 Section
