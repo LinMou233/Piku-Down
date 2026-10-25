@@ -156,9 +156,9 @@ test('same-volume output uses a hard link, unlinks source and never replaces exi
   await fs.writeFile(source, 'new'); await assert.rejects(moveOutputAtomically(source, target, () => assert.fail('claimed existing file')), { code: 'EEXIST' });
   assert.equal(await fs.readFile(target, 'utf8'), 'complete');
 });
-test('only EXDEV falls back to COPYFILE_EXCL and both failure paths protect existing files', async t => {
+test('only EXDEV stages a COPYFILE_EXCL copy and both failure paths protect existing files', async t => {
   const root = await folder(t), source = path.join(root, 'source'), target = path.join(root, 'target'); await fs.writeFile(source, 'copied'); let flags;
-  const io = { link: async () => { throw Object.assign(Error('cross-device'), { code: 'EXDEV' }); }, copyFile: async (a, b, mode) => { flags = mode; await fs.copyFile(a, b, mode); }, unlink: fs.unlink };
+  const io = { ...fs, link: async (a, b) => { if (a === source) throw Object.assign(Error('cross-device'), { code: 'EXDEV' }); return fs.link(a, b); }, copyFile: async (a, b, mode) => { flags = mode; await fs.copyFile(a, b, mode); } };
   await moveOutputAtomically(source, target, () => {}, io); assert.equal(flags, constants.COPYFILE_EXCL); assert.equal(await fs.readFile(target, 'utf8'), 'copied');
   await fs.writeFile(source, 'new'); await assert.rejects(moveOutputAtomically(source, target, () => assert.fail('claimed existing file'), io), { code: 'EEXIST' });
   const denied = Object.assign(Error('denied'), { code: 'EPERM' });
