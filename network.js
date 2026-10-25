@@ -7,16 +7,18 @@ function abortScope(parent,ms){
 }
 // Electron 22 has Chromium-backed net.request, but no session.fetch.
 function sessionFetch(ses,url,options={},net){
- if(typeof ses.fetch==='function')return ses.fetch(url,options);
+ // Electron's fetch Response may omit its final URL. Short-link expansion
+ // explicitly uses redirect events; ordinary downloads keep their native path.
+ if(typeof ses.fetch==='function'&&!options.resolveRedirects)return ses.fetch(url,options);
  return new Promise((resolve,reject)=>{
   const {signal}=options;if(signal?.aborted){reject(signal.reason||Error('请求已取消'));return;}
-  const request=net.request({url,method:options.method||'GET',session:ses,useSessionCookies:true,redirect:'follow'});
+  const request=net.request({url,method:options.method||'GET',session:ses,useSessionCookies:true,redirect:options.resolveRedirects?'manual':'follow'});
   let body,settled=false,finalUrl=url;
   const clean=()=>signal?.removeEventListener('abort',abort);
   const abort=()=>{const error=signal.reason||Error('请求已取消');request.abort();if(body)body.destroy(error);if(!settled)reject(error);clean();};
   signal?.addEventListener('abort',abort,{once:true});
   for(const [name,value] of Object.entries(options.headers||{}))request.setHeader(name,value);
-  request.on('redirect',(_,__,target)=>{finalUrl=target;});
+  request.on('redirect',(_,__,target)=>{finalUrl=target;if(options.resolveRedirects)request.followRedirect();});
   request.on('error',error=>{clean();if(body)body.destroy(error);if(!settled)reject(error);});
   request.on('response',response=>{
    body=new PassThrough();body.on('error',()=>{});

@@ -94,7 +94,10 @@ handle('parse',async(_,input,options={})=>{
    try { return await pending; } finally { pendingExternal.delete(pending); }
  }
  let value=input.trim();
- if (/^https:\/\/b23\.tv\//i.test(value)) {const r=await fetchSession(value,{method:'HEAD',headers});value=r.url;}
+ if (/^https:\/\/b23\.tv\//i.test(value)) {
+  const scope=abortScope(undefined,15000);
+  try {const r=await fetchSession(value,{method:'HEAD',headers,signal:scope.signal,resolveRedirects:true});if(!r.ok)throw Error(`短链接展开失败：${r.status}`);value=r.url;}finally{scope.dispose();}
+ }
  const id=parseId(value);const d=await api(`https://api.bilibili.com/x/web-interface/view?${id}`);
  return {bvid:d.bvid,title:d.title,owner:d.owner.name,cover:d.pic,duration:d.duration,pages:d.pages.map(p=>({cid:p.cid,page:p.page,part:p.part}))};
 });
