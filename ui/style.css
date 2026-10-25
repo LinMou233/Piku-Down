@@ -47,3 +47,17 @@ html[data-theme=dark] .guest-notice{background:#302634ed;color:#ffc1d7;border-co
 .motion-control{will-change:translate}#collapse{translate:none!important;will-change:auto!important}
 
 .page-navigation{display:flex;align-items:center;gap:8px}.page-navigation #parseHome{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;font-size:12px}
+
+.access-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; }
+.access-row label { display:flex; align-items:center; gap:8px; margin:0; font-size:12px; }
+.access-row select { width:auto; min-width:142px; padding:7px 10px; }
+#accessHint { margin:8px 0 12px; }
+.platform-account { margin:18px 0; }
+.platform-account h3 { margin:0 0 10px; font-size:14px; }
+.platform-account h3 span { margin-left:8px; font-weight:400; }
+.platform-account .actions { flex-wrap:wrap; }
+.platform-account button { font-size:12px; padding:8px 12px; }
+#externalStatus { overflow-wrap:anywhere; }
+
+.cookie-memory { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; }
+.cookie-memory input { width:auto; margin:0; accent-color:#fb7299; }

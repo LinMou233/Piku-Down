@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session, dialog, shell, nativeImage, nativeTheme, net } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, nativeImage, nativeTheme, net, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
@@ -10,15 +10,43 @@ const {inspectMedia}=require('./probe');
 const {createDownloadTask,cleanupDownloadTask}=require('./download-task');
 const {sessionFetch,abortScope}=require('./network');
 const {mediaBinary}=require('./media-binary');
+const { createExternalRuntime } = require('./external-runtime');
+const { createExternalAuth, checkPlatform } = require('./external-auth');
+const { createExternalMedia, parseExternalUrl } = require('./external-media');
 const fetchSession=(url,options)=>sessionFetch(ses,url,options,net);
 const legacyRuntime=Number(process.versions.electron.split('.')[0])<=22;let performanceMode=legacyRuntime,dragEffects=true;
 let win, ses, active, activeTask, loginWin, currentQrKey, quitting=false;
-const protectedChannels=new Set(['parse','formats','download','folder','reveal','library','history','clearHistory','saveSettings','importWallpaper']);
+const protectedChannels=new Set(['parse','formats','download','folder','reveal','library','history','clearHistory','saveSettings','importWallpaper','externalState','externalInstall','externalImport','externalRemember','externalClear']);
 function handle(name,callback){ipcMain.handle(name,async(event,...args)=>{if(protectedChannels.has(name)){if(event.sender!==win?.webContents)throw Error('无效的窗口请求');if(name==='library')await auth.require();}return callback(event,...args);});}
 app.setName('Piku Down');
 // Keep the existing profile location across the product rename.
 app.setPath('userData',path.join(app.getPath('appData'),'bili-desktop'));
 app.setAppUserModelId('local.bili.desktop');
+
+const externalRoot = app.getPath('userData');
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
+app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); } });
+const externalLifetime = new AbortController();
+const pendingExternal = new Set();
+const externalRuntime = createExternalRuntime({ root: externalRoot, supported: !legacyRuntime, fetch: (url, options) => sessionFetch(session.defaultSession, url, options, net) });
+const externalAuth = createExternalAuth({ root: externalRoot, safeStorage, clearLegacyX: () => session.fromPartition('persist:piku-x').clearStorageData() });
+const externalProgress = value => { if (win && !win.isDestroyed()) win.webContents.send('progress', value); };
+const externalMedia = createExternalMedia({ runtime: externalRuntime, auth: externalAuth, root: path.join(externalRoot, 'external-temp'), ffmpeg: mediaBinary, progress: externalProgress });
+const isExternal = value => typeof value === 'string' && value.startsWith('external:');
+function idleAccounts() { if (active) throw Error('请在下载结束后更改登录状态'); }
+handle('externalState', async () => ({ accounts: await externalAuth.status(), runtime: await externalRuntime.status() }));
+handle('externalInstall', async () => { idleAccounts(); await externalRuntime.ensure(undefined, externalProgress); return externalRuntime.status(); });
+handle('externalImport', async (_, platform, options = {}) => {
+  idleAccounts(); checkPlatform(platform);
+  const selected = await dialog.showOpenDialog(win, { title: '导入 ' + (platform === 'x' ? 'X' : 'YouTube') + ' Cookie', properties: ['openFile'], filters: [{ name: 'Netscape Cookie 文件', extensions: ['txt'] }] });
+  if (selected.canceled) return null;
+  if ((await fs.stat(selected.filePaths[0])).size > 2 * 1024 * 1024) throw Error('Cookie 文件过大');
+  await externalAuth.importCookies(platform, await fs.readFile(selected.filePaths[0], 'utf8'), { remember: options.remember === true });
+  return externalAuth.status();
+});
+handle('externalRemember', async (_, platform, remember) => { idleAccounts(); checkPlatform(platform); await externalAuth.setRemembered(platform, remember === true); return externalAuth.status(); });
+handle('externalClear', async (_, platform) => { idleAccounts(); checkPlatform(platform); await externalAuth.clear(platform); return externalAuth.status(); });
 
 const headers = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.bilibili.com/' };
 async function api(url,{signal}={}) {
@@ -30,20 +58,23 @@ async function api(url,{signal}={}) {
 }
 async function play(bvid,cid,qn=127,signal) { return api(`https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${Number(cid)}&qn=${Number(qn)}&fnval=4048&fourk=1`,{signal}); }
 app.whenReady().then(async () => {
+ if (!primaryInstance) return;
+ // Remove plaintext cookies left by an interrupted run in this app-owned folder.
+ await fs.rm(path.join(externalRoot,'external-temp'),{recursive:true,force:true});
  const saved=await readData('settings',defaultSettings);performanceMode=legacyRuntime||!!saved.performance;dragEffects=true;const initialTheme=saved.theme==='dark'?'dark':'light';nativeTheme.themeSource=initialTheme;
  ses = session.fromPartition('persist:bilibili');
  win = new BrowserWindow({ width:940,height:680,icon:path.join(__dirname,'resources','icon.ico'),minWidth:720,minHeight:520,frame:false,backgroundColor:initialTheme==='dark'?(saved.darkColor||'#171a24'):(saved.color||'#e7ebf2'),webPreferences:{additionalArguments:['--bili-theme='+initialTheme,...(performanceMode?['--bili-performance']:[]),...(dragEffects?['--bili-drag-effects']:[]),...(legacyRuntime?['--bili-legacy']:[])],preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false} });
  win.setMenuBarVisibility(false); win.loadFile('ui/index.html');
  attachMotion(win);
- let closing=false;win.on('close',event=>{if(closing)return;event.preventDefault();closing=true;saveQueue.finally(()=>{if(!win.isDestroyed())win.destroy();});});
+ let closing=false;win.on('close',event=>{event.preventDefault();if(closing)return;closing=true;active?.abort();externalLifetime.abort();Promise.allSettled([activeTask?.done,...pendingExternal]).then(()=>saveQueue).finally(()=>{if(!win.isDestroyed())win.destroy();});});
  const notifyWindowState=()=>win.webContents.send('windowStateChanged',{maximized:win.isMaximized()});win.on('maximize',notifyWindowState);win.on('unmaximize',notifyWindowState);
- const sayings=['且将新火试新茶，诗酒趁年华。','行到水穷处，坐看云起时。','长风破浪会有时，直挂云帆济沧海。'];
- const windowTitle='Piku Down · '+sayings[Math.floor(Math.random()*sayings.length)];
+ const windowTitle='Piku Down · B站 / X / YouTube';
  win.setTitle(windowTitle); win.on('page-title-updated',e=>e.preventDefault());
  win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
  win.webContents.on('will-navigate', e=>e.preventDefault());
 });
-app.on('before-quit',()=>{quitting=true;active?.abort();});
+app.on('before-quit',()=>{quitting=true;active?.abort();externalLifetime.abort();});
+app.on('will-quit', () => externalAuth.clearSession());
 app.on('window-all-closed',()=>app.quit());
 handle('account',()=>auth.check(true));
 handle('authState',()=>auth.current);
@@ -53,13 +84,19 @@ handle('poll',async(event,key)=>{if(event.sender!==loginWin?.webContents)throw E
 handle('loginClose',event=>{if(event.sender===loginWin?.webContents)loginWin.close();});
 handle('logout',async()=>{active?.abort();auth.invalidate();await ses.clearStorageData();if(loginWin&&!loginWin.isDestroyed())loginWin.close();return true;});
 handle('folder',async()=>{const saved=await readData('settings',defaultSettings);const d=await dialog.showOpenDialog(win,{defaultPath:saved.downloadDir||app.getPath('videos'),properties:['openDirectory','createDirectory']});if(d.canceled)return null;const downloadDir=d.filePaths[0];await updateData('settings',current=>({...current,downloadDir}));return downloadDir;});
-handle('parse',async(_,input)=>{
+handle('parse',async(_,input,options={})=>{
+ if (parseExternalUrl(input)) {
+   const pending = externalMedia.parse(input, options.access || 'public', externalLifetime.signal);
+   pendingExternal.add(pending);
+   try { return await pending; } finally { pendingExternal.delete(pending); }
+ }
  let value=input.trim();
  if (/^https:\/\/b23\.tv\//i.test(value)) {const r=await fetchSession(value,{method:'HEAD',headers});value=r.url;}
  const id=parseId(value);const d=await api(`https://api.bilibili.com/x/web-interface/view?${id}`);
  return {bvid:d.bvid,title:d.title,owner:d.owner.name,cover:d.pic,duration:d.duration,pages:d.pages.map(p=>({cid:p.cid,page:p.page,part:p.part}))};
 });
 handle('formats',async(_,bvid,cid)=>{
+ if (isExternal(bvid)) return externalMedia.formats(bvid,cid);
  const data=await play(bvid,cid);const streams=[...(data.dash?.video||[])];const accepted=data.accept_quality||[];const missing=[120,116,74].filter(id=>accepted.includes(id)&&!streams.some(stream=>stream.id===id));
  const results=await Promise.allSettled(missing.map(id=>play(bvid,cid,id)));for(const result of results){if(result.status==='fulfilled')streams.push(...(result.value.dash?.video||[]));}
  return {video:accepted.map((id,i)=>{const selected=selectVideo(streams,id);return {id,label:data.accept_description[i],available:!!selected||(!data.dash&&data.quality===id),fps:selected?frameRate(selected):0};}),audio:!!data.dash?.audio?.length||!!data.durl?.length};
@@ -80,6 +117,9 @@ handle('download',async(_,opts)=>{
  if(!opts.folder)opts.folder=(await readData('settings',defaultSettings)).downloadDir||app.getPath('videos');if(!path.isAbsolute(opts.folder))throw Error('无效的下载目录');await fs.mkdir(opts.folder,{recursive:true});
  const controller=new AbortController();active=controller;const task=createDownloadTask(controller,opts.folder);activeTask=task;let temp,result,failure,cleanupError;
  try {
+ if (isExternal(opts.bvid)) {
+   result = await downloadExternal(opts, task);
+ } else {
  const audioOnly=opts.kind==='audio';const extension=audioOnly?(opts.audioFormat==='mp3'?'mp3':'m4a'):'mp4';const d=await play(opts.bvid,opts.cid,audioOnly?80:opts.qn,controller.signal);const signal=controller.signal;
  const target=path.join(opts.folder,safeName(opts.title)+'.'+extension);task.target=target;
  try {await fs.access(target);throw Error('同名文件已存在，请更换目录或文件名');}catch(e){if(e.code!=='ENOENT')throw e;}
@@ -108,11 +148,28 @@ handle('download',async(_,opts)=>{
  await new Promise((resolve,reject)=>{const p=spawn(ffmpeg,['-hide_banner','-loglevel','error',...args,'-n',path.join(temp,'output.'+extension)],{windowsHide:true});let err='';p.stderr.on('data',b=>err=(err+b).slice(-3000));const cancel=()=>p.kill();signal.addEventListener('abort',cancel,{once:true});p.on('error',reject);p.on('close',code=>{signal.removeEventListener('abort',cancel);code===0&&!signal.aborted?resolve():reject(Error(signal.aborted?'下载已取消':`合并失败：${err}`));});});
  const info=audioOnly?null:await inspectMedia(ffmpeg,path.join(temp,'output.'+extension),{signal}).catch(()=>null);signal.throwIfAborted();
  await fs.copyFile(path.join(temp,'output.'+extension),target,require('node:fs').constants.COPYFILE_EXCL);task.ownedOutput=true;signal.throwIfAborted();await updateData('history',items=>[{taskId:task.id,title:opts.title,bvid:opts.bvid,qn:opts.qn,kind:audioOnly?'audio':'video',format:extension,video:info,file:target,date:Date.now()},...(Array.isArray(items)?items:[])].slice(0,300)).catch(()=>{});result={file:target,kind:audioOnly?'audio':'video',video:info};
+ }
  }catch(error){failure=error;}finally{
   try{await cleanupDownloadTask(task);if(controller.signal.aborted&&task.ownedOutput)await updateData('history',items=>(Array.isArray(items)?items:[]).filter(item=>item.taskId!==task.id));}catch(error){cleanupError=error;}finally{active=null;activeTask=null;task.resolve({cancelled:controller.signal.aborted,deleted:!cleanupError,error:cleanupError?.message});}
  }
  if(cleanupError)throw cleanupError;if(controller.signal.aborted)throw Error(task.deleteRequested?'下载已取消，当前任务源文件已删除':'下载已取消');if(failure)throw failure;return result;
 });
+async function downloadExternal(opts, task) {
+  const audioOnly = opts.kind === 'audio';
+  const extension = audioOnly ? (opts.audioFormat === 'mp3' ? 'mp3' : 'm4a') : 'mp4';
+  const target = path.join(task.folder, safeName(opts.title) + '.' + extension);
+  task.target = target;
+  try { await fs.access(target); throw Error('同名文件已存在，请更换目录或文件名'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const result = await externalMedia.download(opts, task);
+  const signal = task.controller.signal;
+  const info = audioOnly ? null : await inspectMedia(mediaBinary(), result.file, { signal }).catch(() => null);
+  signal.throwIfAborted();
+  await fs.copyFile(result.file, target, require('node:fs').constants.COPYFILE_EXCL);
+  task.ownedOutput = true;
+  signal.throwIfAborted();
+  await updateData('history', items => [{ taskId: task.id, title: opts.title, platform: result.platform, url: result.url, qn: opts.qn, kind: audioOnly ? 'audio' : 'video', format: extension, video: info, file: target, date: Date.now() }, ...(Array.isArray(items) ? items : [])].slice(0, 300)).catch(() => {});
+  return { file: target, kind: audioOnly ? 'audio' : 'video', video: info };
+}
 handle('reveal',(_,file)=>shell.showItemInFolder(file));
 
 let saveQueue=Promise.resolve();
