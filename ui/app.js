@@ -4,16 +4,71 @@ const status=t=>$('status').textContent=t;
 async function run(fn){try{await fn();}catch(e){status(e.message.replace(/^Error invoking remote method '[^']+': Error: /,''));}}
 async function account(profile){const a=profile||await bili.account();if(accountId!==undefined&&accountId!==a.mid)resetLibrary();accountId=a.mid;$('login').textContent=a.logged?'退出登录':'扫码登录';$('login').dataset.logged=!!a.logged;$('biliAccountState').textContent=a.logged?'已登录 · '+a.name:'未登录';$('biliSettingsLogin').textContent=a.logged?'退出登录':'扫码登录';$('accountName').textContent=a.logged?a.name:'未登录';$('accountName').classList.toggle('vip',!!a.vip);$('accountType').textContent=a.logged?(a.vip?a.vipLabel:'普通会员'):'登录后查看账户信息';$('accountDetails').hidden=!a.logged;$('accountUid').textContent='UID · '+(a.mid||'');$('accountLevel').textContent='等级 · Lv.'+(a.level??0);$('accountExpiry').textContent=a.vip&&a.vipDue?'会员有效期 · '+new Date(a.vipDue).toLocaleDateString('zh-CN'):'';$('accountMessage').textContent=a.error?'账户暂未连接，可稍后重试或重新扫码。':'';const face=typeof a.face==='string'?a.face.replace(/^http:/,'https:'):'';if(a.logged&&/^https:\/\/[^/]+\.hdslb\.com\//i.test(face)){$('avatarImage').src=face;$('avatarImage').hidden=false;$('avatarFallback').hidden=true;}else{$('avatarImage').hidden=true;$('avatarImage').removeAttribute('src');$('avatarFallback').hidden=false;}setAuthState(a);notifyStartupAccount(a);}
 $('login').onclick=()=>run(async()=>{if($('login').dataset.logged==='true'){await bili.logout();await account();status('已退出登录');}else await bili.openLogin();});
-let formatGeneration=0;async function formats(){const generation=++formatGeneration;$('quality').replaceChildren();$('download').disabled=true;const p=video.pages[Number($('page').value)];$('filename').value=`${video.title}${video.pages.length>1?' - P'+p.page+' '+p.part:''}`;status('正在获取可用清晰度…');const formats=await bili.formats(video.bvid,p.cid);if(generation!==formatGeneration)return;const list=formats.video;$('result').dataset.audioAvailable=String(formats.audio);$('downloadKind').querySelector('[value=audio]').disabled=!formats.audio;if(generation!==formatGeneration)return;for(const f of list){const o=new Option(f.label+(!video.platform&&f.fps>=49?' · 标注'+Math.round(f.fps)+'fps':'')+(f.available?'':'（当前不可用）'),f.id);o.disabled=!f.available;$('quality').add(o);}const available=list.find(f=>f.available);if(available)$('quality').value=available.id;$('download').disabled=!available;updateDownloadKind();status(available?'解析完成，选择清晰度后下载':formats.audio?'视频画质暂不可用，可以选择仅下载音频':'当前视频没有可用格式，请稍后重试');}
+let formatGeneration=0;
+async function formats(){
+ if(busy||!video)return;
+ const generation=++formatGeneration,parsed=video,parse=parseGeneration;
+ const current=()=>generation===formatGeneration&&parse===parseGeneration;
+ $('quality').replaceChildren();$('download').disabled=true;
+ const p=parsed.pages[Number($('page').value)];
+ $('filename').value=`${parsed.title}${parsed.pages.length>1?' - P'+p.page+' '+p.part:''}`;
+ status('正在获取可用清晰度…');
+ try{
+  const formats=await bili.formats(parsed.bvid,p.cid);if(!current())return;
+  const list=formats.video;$('result').dataset.audioAvailable=String(formats.audio);
+  $('downloadKind').querySelector('[value=audio]').disabled=!formats.audio;
+  for(const f of list){const o=new Option(f.label+(!parsed.platform&&f.fps>=49?' · 标注'+Math.round(f.fps)+'fps':'')+(f.available?'':'（当前不可用）'),f.id);o.disabled=!f.available;$('quality').add(o);}
+  const available=list.find(f=>f.available);if(available)$('quality').value=available.id;
+  $('download').disabled=!available;updateDownloadKind();
+  status(available?'解析完成，选择清晰度后下载':formats.audio?'视频画质暂不可用，可以选择仅下载音频':'当前视频没有可用格式，请稍后重试');
+ }catch(error){if(current())throw error;}
+}
 function setVideoCover(url){const image=$('videoCover');image.hidden=true;image.removeAttribute('src');$('coverFallback').hidden=false;$('coverFallback').textContent='暂无可用封面';const src=String(url||'').replace(/^http:/,'https:').replace(/^\/\//,'https://');if(!isVideoCover(src))return;$('coverFallback').textContent='封面加载中…';image.onload=()=>{image.hidden=false;$('coverFallback').hidden=true;};image.onerror=()=>{image.hidden=true;$('coverFallback').textContent='封面暂时无法加载';};image.src=src;}
 let parseGeneration=0;
-async function parseVideo(){if(busy)return;const generation=++parseGeneration;$('parse').disabled=true;$('result').hidden=true;$('parseHome').hidden=true;status('正在解析视频…');try{const parsed=await bili.parse($('url').value,{access:$('accessMode').value});if(generation!==parseGeneration)return;video=parsed;$('title').textContent=video.title;$('owner').textContent=(video.platform==='x'?'X':video.platform==='youtube'?'YouTube':'B站')+(video.owner?' · '+video.owner:'');$('pageLabel').textContent=video.platform?'选择视频':'选择分 P';$('formatHint').textContent=video.platform?'视频保存为 MP4，保留源视频帧率；M4A 在源音轨不是 AAC 时会转码。':'画质以片源和账号权限为准，保留源视频帧率。';setVideoCover(video.cover);$('page').replaceChildren(...video.pages.map((p,i)=>new Option((video.platform?'视频 ':'P')+p.page+' · '+p.part,i)));$('result').hidden=false;$('parseHome').hidden=currentView!=='parse';await formats();}finally{if(generation===parseGeneration)$('parse').disabled=false;}}
-function resetParseHome(){if(busy)return;parseGeneration++;formatGeneration++;video=undefined;lastFile=undefined;$('result').hidden=true;$('parseHome').hidden=true;$('url').value='';$('title').textContent='';$('owner').textContent='';$('filename').value='';$('page').replaceChildren();$('quality').replaceChildren();$('videoCover').onload=null;$('videoCover').onerror=null;$('videoCover').removeAttribute('src');$('videoCover').hidden=true;$('coverFallback').hidden=false;$('result').dataset.audioAvailable='false';$('downloadKind').value='video';$('audioOutput').value='m4a';$('audioOutputLabel').hidden=true;$('qualityLabel').hidden=false;$('progress').value=0;$('progressText').textContent='';for(const id of ['reveal','cancel','cancelDelete'])$(id).hidden=true;$('download').disabled=true;$('parse').disabled=false;status('准备就绪');switchView('parse');$('url').focus({preventScroll:true});}
+let downloadGeneration=0,activeDownload=0,singleTaskId;
+function resetDownloadState(){
+ downloadGeneration++;activeDownload=0;lastFile=undefined;singleTaskId=undefined;
+ $('progress').value=0;$('progressText').textContent='';$('reveal').hidden=true;$('reveal').disabled=true;
+ for(const id of ['cancel','cancelDelete']){$(id).hidden=true;$(id).disabled=false;}
+}
+async function parseVideo(){if(busy)return;const generation=++parseGeneration;formatGeneration++;resetDownloadState();video=undefined;$('download').disabled=true;$('result').dataset.audioAvailable='false';$('parse').disabled=true;$('result').hidden=true;$('parseHome').hidden=true;status('正在解析视频…');try{const parsed=await bili.parse($('url').value,{access:$('accessMode').value});if(generation!==parseGeneration)return;video=parsed;$('title').textContent=video.title;$('owner').textContent=(video.platform==='x'?'X':video.platform==='youtube'?'YouTube':'B站')+(video.owner?' · '+video.owner:'');$('pageLabel').textContent=video.platform?'选择视频':'选择分 P';$('formatHint').textContent=video.platform?'视频保存为MP4，保留源视频帧率；M4A在源音轨不是AAC时会转码。':'画质以片源和账号权限为准，保留源视频帧率。';setVideoCover(video.cover);$('page').replaceChildren(...video.pages.map((p,i)=>new Option((video.platform?'视频 ':'P')+p.page+' · '+p.part,i)));$('result').hidden=false;$('parseHome').hidden=currentView!=='parse';await formats();}catch(error){if(generation===parseGeneration)throw error;}finally{if(generation===parseGeneration)$('parse').disabled=false;}}
+function resetParseHome(){if(busy)return;parseGeneration++;formatGeneration++;video=undefined;resetDownloadState();$('result').hidden=true;$('parseHome').hidden=true;$('url').value='';$('title').textContent='';$('owner').textContent='';$('filename').value='';$('page').replaceChildren();$('quality').replaceChildren();$('videoCover').onload=null;$('videoCover').onerror=null;$('videoCover').removeAttribute('src');$('videoCover').hidden=true;$('coverFallback').hidden=false;$('result').dataset.audioAvailable='false';$('downloadKind').value='video';$('audioOutput').value='m4a';$('audioOutputLabel').hidden=true;$('qualityLabel').hidden=false;$('download').disabled=true;$('parse').disabled=false;status('准备就绪');switchView('parse');$('url').focus({preventScroll:true});}
 $('parseHome').onclick=resetParseHome;
 $('parse').onclick=()=>run(parseVideo);
 $('page').onchange=()=>run(formats);$('folder').onclick=()=>run(async()=>{const f=await bili.folder();if(f){folder=f;settings.downloadDir=f;$('folderName').textContent=f;}});
-$('download').onclick=()=>run(async()=>{if(!folder){const saved=await bili.settings();folder=saved.downloadDir;}if(!folder)throw Error('无法获取保存目录，请在设置中更改');busy=true;for(const id of ['download','parse','parseHome','page','quality','filename','folder','downloadKind','audioOutput','accessMode'])$(id).disabled=true;$('cancel').hidden=false;$('cancelDelete').hidden=false;$('cancel').disabled=false;$('cancelDelete').disabled=false;$('reveal').hidden=true;status('正在下载…');try{const completed=await bili.download({folder,bvid:video.bvid,cid:video.pages[Number($('page').value)].cid,qn:video.platform?$('quality').value:Number($('quality').value),kind:$('downloadKind').value,audioFormat:$('audioOutput').value,title:$('filename').value});lastFile=completed.file;status(completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成');if(!$('view-history').hidden)await loadHistory();$('progress').value=100;$('progressText').textContent='已保存：'+lastFile;$('reveal').hidden=false;}finally{busy=false;for(const id of ['download','parse','parseHome','page','quality','filename','folder','downloadKind','audioOutput','accessMode'])$(id).disabled=false;$('cancel').hidden=true;$('cancelDelete').hidden=true;$('cancel').disabled=false;$('cancelDelete').disabled=false;updateDownloadKind();}});
-$('cancel').onclick=()=>bili.cancel();$('reveal').onclick=()=>bili.reveal(lastFile);bili.onProgress(d=>{if($('result').hidden)status(d.label);if(!$('view-settings').hidden)$('externalStatus').textContent=d.label;$('progress').value=d.total?d.received/d.total*100:0;$('progressText').textContent=d.label+(d.total?` · ${(d.received/1048576).toFixed(1)} / ${(d.total/1048576).toFixed(1)} MB`:'');});
+$('download').onclick=()=>run(async()=>{
+ if(busy||!video||$('parse').disabled)return;
+ resetDownloadState();const generation=downloadGeneration;
+ busy=true;for(const id of ['download','parse','parseHome','page','quality','filename','folder','downloadKind','audioOutput','accessMode'])$(id).disabled=true;
+ status('正在下载…');
+ try{
+  if(!folder){const saved=await bili.settings();if(generation!==downloadGeneration)return;folder=saved.downloadDir;}
+  if(!folder)throw Error('无法获取保存目录，请在设置中更改');
+  if(typeof bili.newTaskId==='function')singleTaskId=await bili.newTaskId();
+  if(generation!==downloadGeneration)return;
+  activeDownload=generation;$('cancel').hidden=false;$('cancelDelete').hidden=false;
+  const completed=await bili.download({taskId:singleTaskId,folder,bvid:video.bvid,cid:video.pages[Number($('page').value)].cid,qn:video.platform?$('quality').value:Number($('quality').value),kind:$('downloadKind').value,audioFormat:$('audioOutput').value,title:$('filename').value});
+  if(generation!==downloadGeneration)return;
+  activeDownload=0;lastFile=completed.file;
+  status(completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成');
+  $('progress').value=100;$('progressText').textContent='已保存：'+lastFile;$('reveal').hidden=false;$('reveal').disabled=false;
+  if(!$('view-history').hidden)await loadHistory();
+ }catch(error){if(generation===downloadGeneration)throw error;}
+ finally{
+  if(generation===downloadGeneration){
+   activeDownload=0;busy=false;for(const id of ['download','parse','parseHome','page','quality','filename','folder','downloadKind','audioOutput','accessMode'])$(id).disabled=false;
+   $('cancel').hidden=true;$('cancelDelete').hidden=true;$('cancel').disabled=false;$('cancelDelete').disabled=false;updateDownloadKind();
+  }
+ }
+});
+$('cancel').onclick=()=>bili.cancel(singleTaskId);$('reveal').onclick=()=>{if(lastFile&&!$('reveal').hidden)bili.reveal(lastFile);};
+bili.onProgress(d=>{
+ if(!d.taskId&&!$('view-settings').hidden)$('externalStatus').textContent=d.label;
+ if(d.source==='batch'||(singleTaskId&&d.taskId!==singleTaskId))return;
+ if(!busy||activeDownload!==downloadGeneration)return;
+ if($('result').hidden)status(d.label);
+ $('progress').value=d.total?d.received/d.total*100:0;$('progressText').textContent=d.label+(d.total?` · ${(d.received/1048576).toFixed(1)} / ${(d.total/1048576).toFixed(1)} MB`:'');
+});
 
 
 let settings={dragEffects:bili.initialDragEffects,performance:bili.initialPerformance,mode:'color',color:'#e7ebf2',blur:12,collapsed:false,theme:bili.initialTheme,darkColor:'#171a24'},wallpaper=null,saveTimer;
@@ -62,7 +117,17 @@ bili.onAuthState(profile=>{setAuthState(profile);account(profile).catch(()=>{});
 function updateDownloadKind(){const audio=$('downloadKind').value==='audio';$('audioOutputLabel').hidden=!audio;$('qualityLabel').hidden=audio;$('download').textContent=audio?'下载音频':'开始下载';if(!busy)$('download').disabled=audio?$('result').dataset.audioAvailable!=='true':!$('quality').selectedOptions[0]||$('quality').selectedOptions[0].disabled;}
 $('downloadKind').onchange=updateDownloadKind;
 
-$('cancelDelete').onclick=()=>run(async()=>{$('cancel').disabled=true;$('cancelDelete').disabled=true;$('progressText').textContent='正在取消并删除源文件…';try{const result=await bili.cancelAndDelete();if(result.cancelled){status('下载已取消，当前任务源文件已删除');$('progress').value=0;$('progressText').textContent='音视频源片段和未完成文件已清理。';}else $('progressText').textContent='当前没有进行中的下载任务。';}finally{$('cancel').disabled=false;$('cancelDelete').disabled=false;}});
+$('cancelDelete').onclick=()=>run(async()=>{
+ if(!busy||activeDownload!==downloadGeneration)return;
+ const generation=downloadGeneration;
+ $('cancel').disabled=true;$('cancelDelete').disabled=true;$('progressText').textContent='正在取消并删除源文件…';
+ try{
+  const result=await bili.cancelAndDelete(singleTaskId);if(generation!==downloadGeneration)return;
+  if(result.cancelled){status('下载已取消，当前任务源文件已删除');$('progress').value=0;$('progressText').textContent='音视频源片段和未完成文件已清理。';}
+  else if(busy)$('progressText').textContent='当前没有进行中的下载任务。';
+ }catch(error){if(generation===downloadGeneration)throw error;}
+ finally{if(generation===downloadGeneration){$('cancel').disabled=false;$('cancelDelete').disabled=false;}}
+});
 
 $('performanceMode').onchange=()=>{settings.performance=$('performanceMode').checked;applySettings();clearTimeout(saveTimer);bili.saveSettings(settings).catch(e=>{$('settingsStatus').textContent=e.message;});};
 

@@ -61,3 +61,6 @@ html[data-theme=dark] .guest-notice{background:#302634ed;color:#ffc1d7;border-co
 
 .cookie-memory { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; }
 .cookie-memory input { width:auto; margin:0; accent-color:#fb7299; }
+
+/* 批次下载 */
+.batch-input,.batch-task{padding:24px;margin:20px 0}.batch-input textarea{display:block;box-sizing:border-box;width:100%;resize:vertical;min-height:125px;margin:12px 0;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--glass);color:inherit;font:inherit;line-height:1.6}.batch-options{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0}.batch-options label{display:grid;gap:8px;flex:1;min-width:150px}.batch-options select{width:100%;box-sizing:border-box}.batch-actions{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}.batch-output{overflow-wrap:anywhere;font-size:14px}.batch-task h3{margin:0 0 8px;overflow-wrap:anywhere}.batch-task pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:14px}.batch-task summary{cursor:pointer}.batch-task progress,#batchProgress{width:100%}.batch-list{margin-top:18px}

@@ -1,6 +1,6 @@
 {
   "name": "bili-desktop",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Piku Down · Bilibili、X 与 YouTube 视频下载工具",
   "main": "main.js",
   "author": "@灵眸闪熠",
@@ -41,7 +41,9 @@
       "login-preload.js",
       "probe.js",
       "download-task.js",
+      "download-queue.js",
       "bili-download.js",
+      "output-file.js",
       "network.js",
       "media-binary.js",
       "external-media.js",
