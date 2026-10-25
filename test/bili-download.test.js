@@ -156,7 +156,7 @@ test('same-volume output uses a hard link, unlinks source and never replaces exi
   await fs.writeFile(source, 'new'); await assert.rejects(moveOutputAtomically(source, target, () => assert.fail('claimed existing file')), { code: 'EEXIST' });
   assert.equal(await fs.readFile(target, 'utf8'), 'complete');
 });
-test('only EXDEV stages a COPYFILE_EXCL copy and both failure paths protect existing files', async t => {
+test('EXDEV stages a COPYFILE_EXCL copy while NTFS permission failures retain their error', async t => {
   const root = await folder(t), source = path.join(root, 'source'), target = path.join(root, 'target'); await fs.writeFile(source, 'copied'); let flags;
   const io = { ...fs, link: async (a, b) => { if (a === source) throw Object.assign(Error('cross-device'), { code: 'EXDEV' }); return fs.link(a, b); }, copyFile: async (a, b, mode) => { flags = mode; await fs.copyFile(a, b, mode); } };
   await moveOutputAtomically(source, target, () => {}, io); assert.equal(flags, constants.COPYFILE_EXCL); assert.equal(await fs.readFile(target, 'utf8'), 'copied');

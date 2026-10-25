@@ -13,11 +13,13 @@ const {mediaBinary}=require('./media-binary');
 const { createExternalRuntime } = require('./external-runtime');
 const { createExternalAuth, checkPlatform } = require('./external-auth');
 const { createExternalMedia, parseExternalUrl } = require('./external-media');
-const { createPlayCache, createTransfer, downloadDashStreams, moveOutputAtomically } = require('./bili-download');
+const { createPlayCache, createTransfer, downloadDashStreams } = require('./bili-download');
+const { moveOutputAtomically } = require('./output-file');
+const { createDownloadQueue, normalizeLink } = require('./download-queue');
 const fetchSession=(url,options)=>sessionFetch(ses,url,options,net);
 const legacyRuntime=Number(process.versions.electron.split('.')[0])<=22;let performanceMode=legacyRuntime,dragEffects=true;
-let win, ses, active, activeTask, loginWin, currentQrKey, quitting=false;
-const protectedChannels=new Set(['parse','formats','download','folder','reveal','library','history','clearHistory','saveSettings','importWallpaper','externalState','externalInstall','externalImport','externalRemember','externalClear']);
+let win, ses, loginWin, currentQrKey, quitting=false;
+const protectedChannels=new Set(['parse','formats','download','folder','reveal','library','history','clearHistory','saveSettings','importWallpaper','externalState','externalInstall','externalImport','externalRemember','externalClear','cancel','cancelAndDelete','batchAdd','batchState','batchStart','batchPause','batchResume','batchConcurrency','batchCancelAll','batchClear','newTaskId']);
 function handle(name,callback){ipcMain.handle(name,async(event,...args)=>{if(protectedChannels.has(name)){if(event.sender!==win?.webContents)throw Error('无效的窗口请求');if(name==='library')await auth.require();}return callback(event,...args);});}
 app.setName('Piku Down');
 // Keep the existing profile location across the product rename.
@@ -35,7 +37,7 @@ const externalAuth = createExternalAuth({ root: externalRoot, safeStorage, clear
 const externalProgress = value => { if (win && !win.isDestroyed()) win.webContents.send('progress', value); };
 const externalMedia = createExternalMedia({ runtime: externalRuntime, auth: externalAuth, root: path.join(externalRoot, 'external-temp'), ffmpeg: mediaBinary, progress: externalProgress });
 const isExternal = value => typeof value === 'string' && value.startsWith('external:');
-function idleAccounts() { if (active) throw Error('请在下载结束后更改登录状态'); }
+function idleAccounts() { if (downloads.hasWork()) throw Error('请在下载结束后更改登录状态'); }
 handle('externalState', async () => ({ accounts: await externalAuth.status(), runtime: await externalRuntime.status() }));
 handle('externalInstall', async () => { idleAccounts(); await externalRuntime.ensure(undefined, externalProgress); return externalRuntime.status(); });
 handle('externalImport', async (_, platform, options = {}) => {
@@ -59,7 +61,6 @@ async function api(url,{signal}={}) {
 }
 const playCache = createPlayCache((bvid,cid,qn,signal) => api(`https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${Number(cid)}&qn=${Number(qn)}&fnval=4048&fourk=1`,{signal}));
 function play(bvid,cid,qn=127,signal) { return playCache.get(bvid,cid,qn,signal); }
-const transfer = createTransfer({ fetch: fetchSession, headers, progress: externalProgress });
 app.whenReady().then(async () => {
  if (!primaryInstance) return;
  // Remove plaintext cookies left by an interrupted run in this app-owned folder.
@@ -69,14 +70,14 @@ app.whenReady().then(async () => {
  win = new BrowserWindow({ width:940,height:680,icon:path.join(__dirname,'resources','icon.ico'),minWidth:720,minHeight:520,frame:false,backgroundColor:initialTheme==='dark'?(saved.darkColor||'#171a24'):(saved.color||'#e7ebf2'),webPreferences:{additionalArguments:['--bili-theme='+initialTheme,...(performanceMode?['--bili-performance']:[]),...(dragEffects?['--bili-drag-effects']:[]),...(legacyRuntime?['--bili-legacy']:[])],preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:false} });
  win.setMenuBarVisibility(false); win.loadFile('ui/index.html');
  attachMotion(win);
- let closing=false;win.on('close',event=>{event.preventDefault();if(closing)return;closing=true;active?.abort();externalLifetime.abort();Promise.allSettled([activeTask?.done,...pendingExternal]).then(()=>saveQueue).finally(()=>{if(!win.isDestroyed())win.destroy();});});
+ let closing=false;win.on('close',event=>{event.preventDefault();if(closing)return;closing=true;externalLifetime.abort();Promise.allSettled([downloads.close(),...pendingExternal]).then(()=>saveQueue).finally(()=>{if(!win.isDestroyed())win.destroy();});});
  const notifyWindowState=()=>win.webContents.send('windowStateChanged',{maximized:win.isMaximized()});win.on('maximize',notifyWindowState);win.on('unmaximize',notifyWindowState);
  const windowTitle='Piku Down · B站 / X / YouTube';
  win.setTitle(windowTitle); win.on('page-title-updated',e=>e.preventDefault());
  win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
  win.webContents.on('will-navigate', e=>e.preventDefault());
 });
-app.on('before-quit',()=>{quitting=true;active?.abort();externalLifetime.abort();});
+app.on('before-quit',()=>{quitting=true;void downloads.close().catch(()=>{});externalLifetime.abort();});
 app.on('will-quit', () => externalAuth.clearSession());
 app.on('window-all-closed',()=>app.quit());
 handle('account',()=>auth.check(true));
@@ -85,41 +86,47 @@ handle('openLogin',async()=>{const profile=await auth.check(true);if(!profile.lo
 handle('qr',async(event)=>{if(event.sender!==loginWin?.webContents)throw Error('请在登录窗口扫码');const d=await api('https://passport.bilibili.com/x/passport-login/web/qrcode/generate');currentQrKey=d.qrcode_key;return {key:d.qrcode_key,image:await require('qrcode').toDataURL(d.url,{width:256,margin:2,errorCorrectionLevel:'M'})};});
 handle('poll',async(event,key)=>{if(event.sender!==loginWin?.webContents)throw Error('无效的登录窗口');if(key!==currentQrKey)return {code:86038};const data=await api('https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key='+encodeURIComponent(key));if(data.code===0){const profile=await auth.check(true);if(!profile.logged)throw Error(profile.error||'登录尚未验证，请稍后重试');}return data;});
 handle('loginClose',event=>{if(event.sender===loginWin?.webContents)loginWin.close();});
-handle('logout',async()=>{playCache.clear();active?.abort();auth.invalidate();await ses.clearStorageData();if(loginWin&&!loginWin.isDestroyed())loginWin.close();return true;});
+handle('logout',async()=>{downloads.pause();await downloads.cancelAll();playCache.clear();auth.invalidate();await ses.clearStorageData();if(loginWin&&!loginWin.isDestroyed())loginWin.close();return true;});
 handle('folder',async()=>{const saved=await readData('settings',defaultSettings);const d=await dialog.showOpenDialog(win,{defaultPath:saved.downloadDir||app.getPath('videos'),properties:['openDirectory','createDirectory']});if(d.canceled)return null;const downloadDir=d.filePaths[0];await updateData('settings',current=>({...current,downloadDir}));return downloadDir;});
-handle('parse',async(_,input,options={})=>{
+handle('parse',(_,input,options={})=>parseInput(input,options));
+async function parseInput(input,options={},signal,progress=externalProgress){
  if (parseExternalUrl(input)) {
-   const pending = externalMedia.parse(input, options.access || 'public', externalLifetime.signal);
+   const pending = externalMedia.parse(input, options.access || 'public', signal || externalLifetime.signal, progress);
    pendingExternal.add(pending);
    try { return await pending; } finally { pendingExternal.delete(pending); }
  }
  let value=input.trim();
  if (/^https:\/\/b23\.tv\//i.test(value)) {
-  const scope=abortScope(undefined,15000);
+  const scope=abortScope(signal,15000);
   try {const r=await fetchSession(value,{method:'HEAD',headers,signal:scope.signal,resolveRedirects:true});if(!r.ok)throw Error(`短链接展开失败：${r.status}`);value=r.url;}finally{scope.dispose();}
  }
- const id=parseId(value);const d=await api(`https://api.bilibili.com/x/web-interface/view?${id}`);
+ const id=parseId(value);const d=await api(`https://api.bilibili.com/x/web-interface/view?${id}`,{signal});
  return {bvid:d.bvid,title:d.title,owner:d.owner.name,cover:d.pic,duration:d.duration,pages:d.pages.map(p=>({cid:p.cid,page:p.page,part:p.part}))};
-});
-handle('formats',async(_,bvid,cid)=>{
+}
+handle('formats',(_,bvid,cid)=>getFormats(bvid,cid));
+async function getFormats(bvid,cid,signal){
  if (isExternal(bvid)) return externalMedia.formats(bvid,cid);
- const data=await play(bvid,cid);const streams=[...(data.dash?.video||[])];const accepted=data.accept_quality||[];
+ const data=await play(bvid,cid,undefined,signal);const streams=[...(data.dash?.video||[])];const accepted=data.accept_quality||[];
  if(!data.dash){
   const missing=[120,116,74].filter(id=>accepted.includes(id)&&!streams.some(stream=>stream.id===id));
-  const results=await Promise.allSettled(missing.map(id=>play(bvid,cid,id)));for(const result of results){if(result.status==='fulfilled')streams.push(...(result.value.dash?.video||[]));}
+  const results=await Promise.allSettled(missing.map(id=>play(bvid,cid,id,signal)));for(const result of results){if(result.status==='fulfilled')streams.push(...(result.value.dash?.video||[]));}
  }
  return {video:accepted.map((id,i)=>{const selected=selectVideo(streams,id);return {id,label:data.accept_description[i],available:!!selected||(!data.dash&&data.quality===id),fps:selected?frameRate(selected):0};}),audio:!!data.dash?.audio?.length||!!data.durl?.length};
-});
-handle('cancel',()=>{active?.abort(Error('下载已取消'));});
-handle('cancelAndDelete',async event=>{if(event.sender!==win?.webContents)throw Error('无效的窗口请求');const task=activeTask;if(!task)return {cancelled:false,deleted:false};task.deleteRequested=true;task.controller.abort(Error('下载已取消'));const result=await task.done;if(result.error)throw Error(result.error);return result;});
-handle('download',async(_,opts)=>{
- if(active)throw Error('已有下载任务正在运行');
- if(!opts.folder)opts.folder=(await readData('settings',defaultSettings)).downloadDir||app.getPath('videos');if(!path.isAbsolute(opts.folder))throw Error('无效的下载目录');await fs.mkdir(opts.folder,{recursive:true});
- const controller=new AbortController();active=controller;const task=createDownloadTask(controller,opts.folder);activeTask=task;let temp,result,failure,cleanupError;
- try {
- if (isExternal(opts.bvid)) {
-   result = await downloadExternal(opts, task);
- } else {
+}
+handle('cancel',(_,taskId)=>downloads.cancel(taskId));
+handle('cancelAndDelete',async(event,taskId)=>{if(event.sender!==win?.webContents)throw Error('无效的窗口请求');return downloads.cancel(taskId,true);});
+handle('download',async(_,opts)=>downloads.addSingle({...opts,folder:await downloadFolder(opts.folder)}));
+async function downloadFolder(folder){
+ if(!folder)folder=(await readData('settings',defaultSettings)).downloadDir||app.getPath('videos');
+ if(typeof folder!=='string'||!path.isAbsolute(folder))throw Error('无效的下载目录');
+ return folder;
+}
+async function runDownload(opts,task,progress){
+ const controller=task.controller;
+ controller.signal.throwIfAborted();await fs.mkdir(task.folder,{recursive:true});controller.signal.throwIfAborted();
+ const transfer=createTransfer({fetch:fetchSession,headers,progress});
+ let temp,result;
+ if(isExternal(opts.bvid))return downloadExternal(opts,task,progress);
  const audioOnly=opts.kind==='audio';const extension=audioOnly?(opts.audioFormat==='mp3'?'mp3':'m4a'):'mp4';const d=await play(opts.bvid,opts.cid,audioOnly?80:opts.qn,controller.signal);const signal=controller.signal;
  const target=path.join(opts.folder,safeName(opts.title)+'.'+extension);task.target=target;
  try {await fs.access(target);throw Error('同名文件已存在，请更换目录或文件名');}catch(e){if(e.code!=='ENOENT')throw e;}
@@ -132,10 +139,10 @@ handle('download',async(_,opts)=>{
  else if(d.durl?.length){for(let i=0;i<d.durl.length;i++)await transfer([d.durl[i].url,...(d.durl[i].backup_url||[])],path.join(temp,'seg'+i),signal,'读取分段音轨 '+(i+1)+'/'+d.durl.length);await fs.writeFile(path.join(temp,'list.txt'),d.durl.map((_,i)=>"file 'seg"+i+"'").join('\n'));args=['-f','concat','-safe','0','-i',path.join(temp,'list.txt'),...audioEncoding(extension,false)];}
  else throw Error('这个视频暂时没有可下载的音轨');
  }else if(d.dash){
- win.webContents.send('progress',{label:'正在检测原始视频帧率',received:0,total:0});const video=await selectBestVideo(d.dash.video,opts.qn,stream=>{const url=stream.baseUrl||stream.base_url;return inspectMedia(ffmpeg,url,{remote:true,signal});});
+ progress({label:'正在检测原始视频帧率',received:0,total:0});const video=await selectBestVideo(d.dash.video,opts.qn,stream=>{const url=stream.baseUrl||stream.base_url;return inspectMedia(ffmpeg,url,{remote:true,signal});});
  const audio=[...(d.dash.audio||[])].sort((a,b)=>b.bandwidth-a.bandwidth)[0];
  if(!video)throw Error('当前账号无法下载所选清晰度，请重新解析或登录');
- await downloadDashStreams({video,audio,folder:temp,signal,transfer,progress:externalProgress});
+ await downloadDashStreams({video,audio,folder:temp,signal,transfer,progress});
  args=['-i',path.join(temp,'video'),...(audio?['-i',path.join(temp,'audio')]:[]),'-c','copy'];
  }else {
  if(d.quality!==Number(opts.qn)||!d.durl?.length)throw Error('所选清晰度不可用');
@@ -143,32 +150,65 @@ handle('download',async(_,opts)=>{
  await fs.writeFile(path.join(temp,'list.txt'),d.durl.map((_,i)=>`file 'seg${i}'`).join('\n'));
  args=['-f','concat','-safe','0','-i',path.join(temp,'list.txt'),'-c','copy'];
  }
- signal.throwIfAborted();win.webContents.send('progress',{label:audioOnly?'正在处理音频':'正在合并音视频',received:0,total:0});
+ signal.throwIfAborted();progress({label:audioOnly?'正在处理音频':'正在合并音视频',received:0,total:0});
  await new Promise((resolve,reject)=>{const p=spawn(ffmpeg,['-hide_banner','-loglevel','error',...args,'-n',path.join(temp,'output.'+extension)],{windowsHide:true});let err='';p.stderr.on('data',b=>err=(err+b).slice(-3000));const cancel=()=>p.kill();signal.addEventListener('abort',cancel,{once:true});p.on('error',reject);p.on('close',code=>{signal.removeEventListener('abort',cancel);code===0&&!signal.aborted?resolve():reject(Error(signal.aborted?'下载已取消':`合并失败：${err}`));});});
  const info=audioOnly?null:await inspectMedia(ffmpeg,path.join(temp,'output.'+extension),{signal}).catch(()=>null);signal.throwIfAborted();
  await moveOutputAtomically(path.join(temp,'output.'+extension),target,()=>{task.ownedOutput=true;},fs,signal);signal.throwIfAborted();await updateData('history',items=>[{taskId:task.id,title:opts.title,bvid:opts.bvid,qn:opts.qn,kind:audioOnly?'audio':'video',format:extension,video:info,file:target,date:Date.now()},...(Array.isArray(items)?items:[])].slice(0,300)).catch(()=>{});result={file:target,kind:audioOnly?'audio':'video',video:info};
- }
- }catch(error){failure=error;}finally{
-  try{await cleanupDownloadTask(task);if(controller.signal.aborted&&task.ownedOutput)await updateData('history',items=>(Array.isArray(items)?items:[]).filter(item=>item.taskId!==task.id));}catch(error){cleanupError=error;}finally{active=null;activeTask=null;task.resolve({cancelled:controller.signal.aborted,deleted:!cleanupError,error:cleanupError?.message});}
- }
- if(cleanupError)throw cleanupError;if(controller.signal.aborted)throw Error(task.deleteRequested?'下载已取消，当前任务源文件已删除':'下载已取消');if(failure)throw failure;return result;
-});
-async function downloadExternal(opts, task) {
+ return result;
+}
+
+async function downloadExternal(opts, task, progress) {
   const audioOnly = opts.kind === 'audio';
   const extension = audioOnly ? (opts.audioFormat === 'mp3' ? 'mp3' : 'm4a') : 'mp4';
   const target = path.join(task.folder, safeName(opts.title) + '.' + extension);
   task.target = target;
   try { await fs.access(target); throw Error('同名文件已存在，请更换目录或文件名'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const result = await externalMedia.download(opts, task);
+  const result = await externalMedia.download(opts, task, progress);
   const signal = task.controller.signal;
   const info = audioOnly ? null : await inspectMedia(mediaBinary(), result.file, { signal }).catch(() => null);
   signal.throwIfAborted();
-  await fs.copyFile(result.file, target, require('node:fs').constants.COPYFILE_EXCL);
-  task.ownedOutput = true;
+  await moveOutputAtomically(result.file, target, () => { task.ownedOutput = true; }, fs, signal);
   signal.throwIfAborted();
   await updateData('history', items => [{ taskId: task.id, title: opts.title, platform: result.platform, url: result.url, qn: opts.qn, kind: audioOnly ? 'audio' : 'video', format: extension, video: info, file: target, date: Date.now() }, ...(Array.isArray(items) ? items : [])].slice(0, 300)).catch(() => {});
   return { file: target, kind: audioOnly ? 'audio' : 'video', video: info };
 }
+
+async function prepareBatch(job,progress){
+ const signal=job.task.controller.signal;
+ signal.throwIfAborted();await fs.mkdir(job.task.folder,{recursive:true});signal.throwIfAborted();
+ const parsed=await parseInput(job.input,{access:job.settings.access},signal,progress);
+ signal.throwIfAborted();
+ const page=parsed.pages[0];if(!page)throw Error('没有可下载的视频');
+ const formats=await getFormats(parsed.bvid,page.cid,signal);signal.throwIfAborted();
+ const available=formats.video.filter(format=>format.available);
+ const height=format=>Number(/(\d{3,4})[pP]/.exec(format.label)?.[1])||0;
+ const maximum=job.settings.maxHeight;
+ const format=available.find(format=>!maximum||height(format)<=maximum)||available.at(-1);
+ if(!format)throw Error('当前视频没有可用画质');
+ return {folder:job.task.folder,bvid:parsed.bvid,cid:page.cid,qn:format.id,kind:'video',title:parsed.title,
+  platform:parsed.platform,canonical:parsed.platform?normalizeLink(job.input).key:'bili:'+parsed.bvid};
+}
+const downloads=createDownloadQueue({
+ prepare:prepareBatch,run:runDownload,
+ async cleanup(task){await cleanupDownloadTask(task);if(task.controller.signal.aborted&&task.ownedOutput)await updateData('history',items=>(Array.isArray(items)?items:[]).filter(item=>item.taskId!==task.id));},
+ emit(task){if(win&&!win.isDestroyed()){
+  win.webContents.send('downloadState',task);
+  if(!['completed','cancelled','failed','skipped'].includes(task.state))win.webContents.send('progress',{taskId:task.taskId,source:task.source,label:task.label,received:task.received,total:task.total});
+ }}
+});
+handle('newTaskId',()=>downloads.newTaskId());
+handle('batchAdd',async(_,text,options={})=>{
+ if(!['public','session'].includes(options.access||'public'))throw Error('无效的访问方式');
+ const maxHeight=Number(options.maxHeight)||0;if(![0,360,720,1080].includes(maxHeight))throw Error('无效的画质上限');
+ return downloads.addBatch(text,{folder:await downloadFolder(options.folder),access:options.access||'public',maxHeight});
+});
+handle('batchState',()=>downloads.state());
+handle('batchStart',()=>downloads.start());
+handle('batchPause',()=>downloads.pause());
+handle('batchResume',()=>downloads.start());
+handle('batchConcurrency',(_,value)=>downloads.setConcurrency(value));
+handle('batchCancelAll',async()=>{await downloads.cancelAll('batch');return downloads.state();});
+handle('batchClear',()=>downloads.clear());
 handle('reveal',(_,file)=>shell.showItemInFolder(file));
 
 let saveQueue=Promise.resolve();

@@ -3,7 +3,7 @@ const {parseId}=require('../core');const {abortScope}=require('../network');
 const source=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8');
 function fixture(fetchSession){
  const handlers=new Map(),calls=[];
- const context=vm.createContext({handle:(name,callback)=>handlers.set(name,callback),parseExternalUrl:()=>null,parseId,abortScope,fetchSession,headers:{Referer:'https://www.bilibili.com/'},api:async url=>{calls.push(url);return {bvid:'BV1B3YS69E51',title:'fixture',owner:{name:'fixture'},pages:[{cid:1,page:1,part:'fixture'}]};}});
+ const context=vm.createContext({handle:(name,callback)=>handlers.set(name,callback),externalProgress(){},parseExternalUrl:()=>null,parseId,abortScope,fetchSession,headers:{Referer:'https://www.bilibili.com/'},api:async url=>{calls.push(url);return {bvid:'BV1B3YS69E51',title:'fixture',owner:{name:'fixture'},pages:[{cid:1,page:1,part:'fixture'}]};}});
  vm.runInContext(source.slice(source.indexOf("handle('parse',"),source.indexOf("handle('formats',")),context);
  return {parse:handlers.get('parse'),calls};
 }

@@ -1,5 +1,5 @@
-const fs = require('node:fs/promises');
-const { createWriteStream, constants } = require('node:fs');
+const { createWriteStream } = require('node:fs');
+const { moveOutputAtomically } = require('./output-file');
 const path = require('node:path');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
@@ -162,34 +162,6 @@ async function downloadDashStreams({ video, audio, folder, signal, transfer, pro
   } finally {
     signal.removeEventListener('abort', abort);
     reporter.dispose();
-  }
-}
-
-async function moveOutputAtomically(src, target, onCreated = () => {}, io = fs, signal) {
-  signal?.throwIfAborted();
-  let staging;
-  try {
-    try { await io.link(src, target); }
-    catch (error) {
-      if (error.code !== 'EXDEV') throw error;
-      signal?.throwIfAborted();
-      // A private directory proves ownership even if copyFile leaves a partial
-      // file. Both the staging file and final link are on the target volume.
-      staging = await io.mkdtemp(path.join(path.dirname(target), '.bilidown-output-'));
-      signal?.throwIfAborted();
-      const file = path.join(staging, 'output');
-      // copyFile cannot be aborted: wait for it to settle before cleanup.
-      await io.copyFile(src, file, constants.COPYFILE_EXCL);
-      signal?.throwIfAborted();
-      // link publishes the complete file without replacing a racing target.
-      await io.link(file, target);
-    }
-    // Ownership must be recorded even if unlink fails or cancellation arrives.
-    onCreated();
-    signal?.throwIfAborted();
-    await io.unlink(src);
-  } finally {
-    if (staging) await io.rm(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 });
   }
 }
 

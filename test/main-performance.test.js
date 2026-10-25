@@ -39,6 +39,7 @@ test('formats preserves non-DASH compensation, tolerates failures and delegates 
 test('main reuses the formats cache at download quality and clears it on account notifications/logout', async () => {
   const handlers = new Map(); let requests = 0, mid = 1, logged = true, cleared = false;
   const context = vm.createContext({ ...helpers, createAuthGate, handle: (name, callback) => handlers.set(name, callback), api: async url => url.includes('/nav') ? { isLogin: true, mid } : (requests++, { dash: { video: [{ id: 80 }] } }), headers: {}, fetchSession: () => assert.fail('unexpected transfer'), externalProgress: () => {}, active: new AbortController(), loginWin: undefined, win: { isDestroyed: () => false, webContents: { send() {} } }, ses: { cookies: { get: async () => logged ? [{ name: 'SESSDATA', value: 'fixture' }] : [] }, clearStorageData: async () => { cleared = true; logged = false; } } });
+  context.downloads = { pause() {}, async cancelAll() { context.active.abort(); } };
   vm.runInContext(source.slice(source.indexOf('const playCache ='), source.indexOf('app.whenReady()')), context);
   vm.runInContext(source.slice(source.indexOf('const auth=createAuthGate'), source.indexOf('async function ensureLoginWindow')), context);
   vm.runInContext(source.split('\n').find(line => line.startsWith("handle('logout',")), context);
@@ -64,7 +65,14 @@ async function downloadFixture(t, cancelAtMove = false) {
     fs.writeFile(args.at(-1), 'merged-output').then(() => child.emit('close', 0), error => child.emit('error', error));
     return child;
   } });
+  context.createTransfer = () => context.transfer; context.fetchSession = () => {}; context.headers = {};
+  context.createDownloadQueue = require('../download-queue').createDownloadQueue;
+  context.prepareBatch = () => assert.fail('unexpected batch preparation'); context.win.isDestroyed = () => false;
   vm.runInContext(source.slice(source.indexOf("handle('cancel',"), source.indexOf('async function downloadExternal')), context);
+  vm.runInContext(source.slice(source.indexOf('const downloads=createDownloadQueue'), source.indexOf("handle('reveal',")), context);
+  const queue = vm.runInContext('downloads', context);
+  Object.defineProperty(context, 'activeTask', { get: () => [...queue.jobs.values()].find(job => !['completed','cancelled','failed','skipped'].includes(job.state))?.task || null });
+  Object.defineProperty(context, 'active', { get: () => context.activeTask?.controller || null });
   return { root, context, commands, events, download: handlers.get('download'), cancelAndDelete: handlers.get('cancelAndDelete'), history: () => history, apiCalls: () => apiCalls, externalCalls: () => externalCalls };
 }
 test('the real download IPC preserves its result/history while using parallel streams and exclusive finalization', async t => {

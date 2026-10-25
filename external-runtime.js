@@ -69,10 +69,28 @@ function createExternalRuntime({ root, fetch, arch = process.arch, supported = t
     }
   }
   async function ensure(signal, progress) {
-    if (!installing) installing = install(signal, progress).finally(() => { installing = null; });
-    const result = await installing;
     signal?.throwIfAborted();
-    return result;
+    if (installing?.controller.signal.aborted) { await installing.promise.catch(() => {}); return ensure(signal, progress); }
+    if (!installing) {
+      const flight = { controller: new AbortController(), listeners: new Set() };
+      installing = flight;
+      flight.promise = install(flight.controller.signal, value => {
+        for (const listener of flight.listeners) listener.progress?.(value);
+      }).finally(() => { if (installing === flight) installing = null; });
+    }
+    const flight = installing, listener = { progress };
+    flight.listeners.add(listener);
+    let abort;
+    const cancelled = new Promise((_, reject) => { abort = () => reject(signal.reason || Error('下载已取消')); });
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try { return await Promise.race([flight.promise, cancelled]); }
+    finally {
+      signal?.removeEventListener('abort', abort); flight.listeners.delete(listener);
+      if (installing === flight && !flight.listeners.size) {
+        flight.controller.abort(); await flight.promise.catch(() => {});
+      }
+    }
   }
   return { status, ensure };
 }

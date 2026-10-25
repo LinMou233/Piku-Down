@@ -102,7 +102,7 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
     if (!entry) throw new UserError('请选择要下载的视频');
     return { record, entry };
   }
-  async function parse(input, access = 'public', signal) {
+  async function parse(input, access = 'public', signal, report = progress) {
     const source = parseExternalUrl(input);
     if (!source) throw new UserError('不支持的视频链接');
     if (!['public', 'session'].includes(access)) throw new UserError('无效的访问方式');
@@ -111,7 +111,7 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
     try {
       // Fail before installing tools if the requested login state is missing.
       if (access === 'session' && !await auth.cookies(source.platform)) throw new UserError('尚未保存该平台的登录状态，请先到设置中导入 Cookie');
-      const executable = await runtime.ensure(signal, progress);
+      const executable = await runtime.ensure(signal, report);
       await fs.mkdir(root, { recursive: true });
       temporary = await fs.mkdtemp(path.join(root, 'parse-'));
       const json = await withCookies(record, cookies => run(executable, [...common(), ...cookies, '--dump-single-json', '--skip-download', '--playlist-items', '1:20', '--', source.url], { timeout: 120000, signal, env }));
@@ -129,7 +129,7 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
     const { entry } = lookup(key, cid);
     return { video: entry.video.map(({ id, label, fps, available }) => ({ id, label, fps, available })), audio: !!entry.audio };
   }
-  async function download(opts, task) {
+  async function download(opts, task, report = progress) {
     const { record, entry } = lookup(opts.bvid, opts.cid);
     const signal = task.controller.signal;
     const audioOnly = opts.kind === 'audio';
@@ -138,13 +138,13 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
     if (audioOnly ? !entry.audio : !format) throw new UserError('所选格式不可用，请重新解析');
     task.temp = await fs.mkdtemp(path.join(task.folder, '.bilidown-'));
     try {
-      const executable = await runtime.ensure(signal, progress);
+      const executable = await runtime.ensure(signal, report);
       const audioSelector = record.platform === 'x' ? 'bestaudio/best' : 'bestaudio[acodec!^=iamf]/best[acodec!^=iamf]';
       const selection = audioOnly ? ['-f', audioSelector, '-x', '--audio-format', extension, '--audio-quality', extension === 'mp3' ? '320K' : '0'] : ['-f', format.hasAudio ? format.id : `${format.id}+bestaudio[ext=m4a][acodec!^=iamf]/${format.id}+bestaudio[acodec!^=iamf]/${format.id}`, '--merge-output-format', 'mp4', '--remux-video', 'mp4'];
       let lastProgress = 0;
       await withCookies(record, cookies => run(executable, [...common(), ...cookies, ...selection, '--ffmpeg-location', ffmpeg(), '--playlist-items', String(entry.index), '--no-simulate', '--no-overwrites', '--newline', '--progress', '--progress-template', 'download:PIKU_PROGRESS:%(progress)j', '-o', path.join(task.temp, 'media.%(ext)s'), '--', record.url], {
         signal, env,
-        onLine(line) { const event = progressFromLine(line); if (event && (Date.now() - lastProgress > 100 || event.label === '正在处理音视频')) { progress(event); lastProgress = Date.now(); } }
+        onLine(line) { const event = progressFromLine(line); if (event && (Date.now() - lastProgress > 100 || event.label === '正在处理音视频')) { report(event); lastProgress = Date.now(); } }
       }));
       signal.throwIfAborted();
       const file = path.join(task.temp, 'media.' + extension);
