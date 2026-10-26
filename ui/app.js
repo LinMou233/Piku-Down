@@ -50,7 +50,7 @@ $('download').onclick=()=>run(async()=>{
   const completed=await bili.download({taskId:singleTaskId,folder,bvid:video.bvid,cid:video.pages[Number($('page').value)].cid,qn:video.platform?$('quality').value:Number($('quality').value),kind:$('downloadKind').value,audioFormat:$('audioOutput').value,title:$('filename').value});
   if(generation!==downloadGeneration)return;
   activeDownload=0;lastFile=completed.file;
-  status(completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成');
+  status((completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成')+(completed.warning?' · 清理警告：'+completed.warning:''));
   $('progress').value=100;$('progressText').textContent='已保存：'+lastFile;$('reveal').hidden=false;$('reveal').disabled=false;
   if(!$('view-history').hidden)await loadHistory();
  }catch(error){if(generation===downloadGeneration)throw error;}

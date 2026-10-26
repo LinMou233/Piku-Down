@@ -50,6 +50,11 @@ test('new download starts at zero and keeps the completed file reveal action',as
  assert.equal(r.$('progress').value,100);assert.equal(r.$('progressText').textContent,'已保存：C:/test/new.mp4');assert.equal(r.$('reveal').hidden,false);
  r.$('reveal').onclick();assert.deepEqual(r.revealed,['C:/test/new.mp4']);
 });
+test('a completed download with a cleanup warning keeps the saved file and shows the warning',async()=>{
+ const r=renderer({download:async()=>({file:'C:/test/warn.mp4',warning:'正式文件已保存，但暂存文件清理失败：busy'})});await r.parse();await r.download();
+ assert.equal(r.$('progress').value,100);assert.equal(r.$('progressText').textContent,'已保存：C:/test/warn.mp4');assert.equal(r.$('reveal').hidden,false);
+ assert.match(r.$('status').textContent,/^下载完成 · 清理警告：正式文件已保存.*busy$/);
+});
 test('progress after completion or during a new parse cannot overwrite UI state',async()=>{
  const r=renderer();await r.seed();const saved=r.$('progressText').textContent;
  r.progress({label:'late',received:1,total:2});assert.equal(r.$('progressText').textContent,saved);assert.equal(r.$('progress').value,100);

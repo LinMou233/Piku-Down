@@ -3,6 +3,7 @@ const { createDownloadTask } = require('./download-task');
 const { parseExternalUrl } = require('./external-media');
 const { parseId } = require('./core');
 const terminal = new Set(['completed', 'failed', 'cancelled', 'skipped']);
+const retryable = new Set(['failed', 'cancelled']);
 
 function normalizeLink(input) {
   const value = String(input).trim();
@@ -49,16 +50,20 @@ function createDownloadQueue({ prepare, run, cleanup, emit = () => {}, now = Dat
     let cleanupError;
     try { await cleanup(job.task); } catch (error) { cleanupError = error; }
     const cancelled = job.task.controller.signal.aborted;
-    job.task.resolve({ cancelled, deleted: !cleanupError, error: cleanupError?.message });
+    // 正式檔已發布時，暫存清理失敗只作警告，狀態仍須與磁碟及歷史一致。
+    const published = !cancelled && !failure && !skipped;
+    job.task.resolve({ cancelled, deleted: !cleanupError, error: published ? undefined : cleanupError?.message });
     job.speed = 0;
-    job.state = cleanupError ? 'failed' : cancelled ? 'cancelled' : skipped ? 'skipped' : failure ? 'failed' : 'completed';
-    job.error = cleanupError?.message || (!cancelled && failure?.message) || '';
+    job.state = published ? 'completed' : cleanupError ? 'failed' : cancelled ? 'cancelled' : skipped ? 'skipped' : 'failed';
+    const warning = published ? [job.task.cleanupWarning, cleanupError?.message].filter(Boolean).join('；') : '';
+    job.error = warning || cleanupError?.message || (!cancelled && failure?.message) || '';
+    if (job.state !== 'completed' && job.canonical && resolved.get(job.canonical) === job.task.id) resolved.delete(job.canonical);
     job.label = { completed: '下载完成', failed: '失败', cancelled: '已取消', skipped: '重复，已跳过' }[job.state];
     if (job.state === 'completed') { job.file = result.file; job.progress = 100; }
     else { job.file = ''; job.progress = 0; }
     changed(job);
     if (job.started) running--;
-    if (job.state === 'completed') job.resolve({ ...result, taskId: job.task.id });
+    if (job.state === 'completed') job.resolve({ ...result, taskId: job.task.id, ...(warning && { warning }) });
     else job.reject(cleanupError || (cancelled ? Error(job.task.deleteRequested ? '下载已取消，当前任务源文件已删除' : '下载已取消') : failure || Error(job.label)));
     pump();
   }
@@ -69,8 +74,8 @@ function createDownloadQueue({ prepare, run, cleanup, emit = () => {}, now = Dat
       job.task.controller.signal.throwIfAborted();
       if (job.source === 'batch') {
         job.title = prepared.title; job.platform = prepared.platform || 'bilibili'; changed(job);
-        if (resolved.has(prepared.canonical)) return await finish(job, null, Error('与佇列内其他链接指向同一影片，已跳过'), true);
-        resolved.set(prepared.canonical, job.task.id);
+        if (resolved.has(prepared.canonical)) { job.duplicateOf = resolved.get(prepared.canonical); return await finish(job, null, Error('与佇列内其他链接指向同一影片，已跳过'), true); }
+        resolved.set(prepared.canonical, job.task.id); job.canonical = prepared.canonical;
       }
       job.state = 'downloading'; job.label = '正在下载';
       job.received = 0; job.total = 0; job.progress = 0; job.speed = 0; job.lastBytes = 0; job.lastTime = now(); changed(job);
@@ -106,24 +111,34 @@ function createDownloadQueue({ prepare, run, cleanup, emit = () => {}, now = Dat
   function addBatch(text, settings) {
     const lines = String(text).split(/\r?\n/).map((input,index) => ({input:input.trim(),line:index+1})).filter(item => item.input);
     if (!lines.length || lines.length > 100) throw Error('每次请输入1～100行链接');
-    const added = [], duplicates = [], invalid = [];
+    const added = [], duplicates = [], invalid = [], resubmitted = [];
     for (const {input,line} of lines) {
       try {
         const source = normalizeLink(input);
-        if (inputs.has(source.key)) { duplicates.push({ line, input }); continue; }
+        const previous = jobs.get(inputs.get(source.key));
+        if (previous && !canResubmit(previous)) { duplicates.push({ line, input }); continue; }
         const job = enqueue({ source: 'batch', input: source.input, platform: source.platform, ...settings });
         inputs.set(source.key, job.task.id); added.push(job.task.id);
+        if (previous) resubmitted.push({ line, input });
       } catch (error) { invalid.push({ line, input, error: error.message }); }
     }
-    pump(); return { added, duplicates, invalid };
+    pump(); return { added, duplicates, invalid, resubmitted };
+  }
+  // 失敗或取消的連結可重新加入；被跳過的別名只在其原任務失敗或取消後才可重新加入。
+  function canResubmit(job) {
+    if (retryable.has(job.state)) return true;
+    return job.state === 'skipped' && retryable.has(jobs.get(job.duplicateOf)?.state);
   }
   function addSingle(opts) { const job = enqueue({ source: 'single', opts, taskId: opts.taskId }); pump(); return job.done; }
   async function cancel(taskId, deleteRequested = false) {
     const job = taskId ? jobs.get(taskId) : [...jobs.values()].find(job => job.source === 'single' && !terminal.has(job.state));
     if (!job || terminal.has(job.state)) return { cancelled: false, deleted: false };
-    job.task.deleteRequested ||= deleteRequested;
-    job.task.controller.abort(Error('下载已取消')); job.label = '正在取消并清理'; changed(job);
-    if (!job.started) void finish(job, null, Error('下载已取消'));
+    // 已進入收尾的任務不再中止，避免已發布的檔案被標成取消或在清理途中被刪除。
+    if (!job.finishing) {
+      job.task.deleteRequested ||= deleteRequested;
+      job.task.controller.abort(Error('下载已取消')); job.label = '正在取消并清理'; changed(job);
+      if (!job.started) void finish(job, null, Error('下载已取消'));
+    }
     const result = await job.task.done;
     if (result.error) throw Error(result.error);
     return result;

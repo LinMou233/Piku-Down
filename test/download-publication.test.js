@@ -41,6 +41,15 @@ for (const bvid of ['BVfixture', 'external:x', 'external:youtube']) {
     assert.equal((await f.task().done).deleted, true); assert.equal(f.context.activeTask, null);
   });
 
+  test(`${bvid} source cleanup failure after publication keeps the completed file, history and a warning`, async t => {
+    const root = await folder(t), f = publicationFixture(root, { io: { ...fs, unlink: async () => { throw Object.assign(Error('locked source'), { code: 'EBUSY' }); } } });
+    const result = await f.download({ bvid, title: 'warn' });
+    assert.match(result.warning, /正式文件已保存.*locked source/); assert.equal(await fs.readFile(result.file, 'utf8'), 'complete fixture');
+    assert.equal(f.history()[0].file, result.file); assert.equal(f.history()[0].taskId, f.task().id);
+    const [task] = f.queue.state().tasks; assert.equal(task.state, 'completed'); assert.equal(task.file, result.file); assert.match(task.error, /locked source/);
+    assert.deepEqual(await fs.readdir(root), ['warn.mp4']); assert.equal(f.context.activeTask, null);
+  });
+
   for (const code of ['EIO', 'ENOSPC']) test(`${bvid} mid-copy ${code} leaves no output/history or temporary files`, async t => {
     const root = await folder(t), f = publicationFixture(root, { io: { ...fs,
       link: async () => { throw Object.assign(Error('cross-device'), { code: 'EXDEV' }); },

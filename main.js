@@ -153,8 +153,14 @@ async function runDownload(opts,task,progress){
  signal.throwIfAborted();progress({label:audioOnly?'正在处理音频':'正在合并音视频',received:0,total:0});
  await new Promise((resolve,reject)=>{const p=spawn(ffmpeg,['-hide_banner','-loglevel','error',...args,'-n',path.join(temp,'output.'+extension)],{windowsHide:true});let err='';p.stderr.on('data',b=>err=(err+b).slice(-3000));const cancel=()=>p.kill();signal.addEventListener('abort',cancel,{once:true});p.on('error',reject);p.on('close',code=>{signal.removeEventListener('abort',cancel);code===0&&!signal.aborted?resolve():reject(Error(signal.aborted?'下载已取消':`合并失败：${err}`));});});
  const info=audioOnly?null:await inspectMedia(ffmpeg,path.join(temp,'output.'+extension),{signal}).catch(()=>null);signal.throwIfAborted();
- await moveOutputAtomically(path.join(temp,'output.'+extension),target,()=>{task.ownedOutput=true;},fs,signal);signal.throwIfAborted();await updateData('history',items=>[{taskId:task.id,title:opts.title,bvid:opts.bvid,qn:opts.qn,kind:audioOnly?'audio':'video',format:extension,video:info,file:target,date:Date.now()},...(Array.isArray(items)?items:[])].slice(0,300)).catch(()=>{});result={file:target,kind:audioOnly?'audio':'video',video:info};
+ await publishOutput(path.join(temp,'output.'+extension),target,task,signal);signal.throwIfAborted();await updateData('history',items=>[{taskId:task.id,title:opts.title,bvid:opts.bvid,qn:opts.qn,kind:audioOnly?'audio':'video',format:extension,video:info,file:target,date:Date.now()},...(Array.isArray(items)?items:[])].slice(0,300)).catch(()=>{});result={file:target,kind:audioOnly?'audio':'video',video:info};
  return result;
+}
+
+// Once the final file exists and the task was not cancelled, a later staging cleanup failure is only a warning.
+async function publishOutput(src, target, task, signal) {
+  try { await moveOutputAtomically(src, target, () => { task.ownedOutput = true; }, fs, signal); }
+  catch (error) { if (!task.ownedOutput || signal.aborted) throw error; task.cleanupWarning = '正式文件已保存，但暂存文件清理失败：' + error.message; }
 }
 
 async function downloadExternal(opts, task, progress) {
@@ -167,7 +173,7 @@ async function downloadExternal(opts, task, progress) {
   const signal = task.controller.signal;
   const info = audioOnly ? null : await inspectMedia(mediaBinary(), result.file, { signal }).catch(() => null);
   signal.throwIfAborted();
-  await moveOutputAtomically(result.file, target, () => { task.ownedOutput = true; }, fs, signal);
+  await publishOutput(result.file, target, task, signal);
   signal.throwIfAborted();
   await updateData('history', items => [{ taskId: task.id, title: opts.title, platform: result.platform, url: result.url, qn: opts.qn, kind: audioOnly ? 'audio' : 'video', format: extension, video: info, file: target, date: Date.now() }, ...(Array.isArray(items) ? items : [])].slice(0, 300)).catch(() => {});
   return { file: target, kind: audioOnly ? 'audio' : 'video', video: info };
