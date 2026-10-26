@@ -30,7 +30,7 @@
         cancel.onclick=async()=>{cancel.disabled=true;try{await api.cancelAndDelete(task.taskId);}catch(e){error(e);}finally{cancel.disabled=ended.has(model.tasks.get(task.taskId)?.state);}};
         reveal.onclick=()=>{const current=model.tasks.get(task.taskId);if(current?.state==='completed'&&current.file)api.reveal(current.file).catch(error);};
         buttons.append(cancel,reveal);item.append(title,meta,progress,detail,output,buttons,errors);$('batchList').append(item);
-        nodes={item,title,meta,progress,detail,output,cancel,reveal,errors,text};rows.set(task.taskId,nodes);
+        nodes={item,title,meta,progress,detail,output,cancel,reveal,errors,summary,text};rows.set(task.taskId,nodes);
       }
       const speed=task.speed>0?(task.speed>=1048576?(task.speed/1048576).toFixed(1)+'MB/s':(task.speed/1024).toFixed(1)+'KB/s'):'—';
       nodes.title.textContent=task.title;nodes.meta.textContent=({bilibili:'B站',x:'X',youtube:'YouTube'}[task.platform]||'视频')+' · '+labels[task.state];
@@ -40,12 +40,13 @@
       nodes.output.textContent=task.file?'已保存：'+task.file:'';
       nodes.reveal.hidden=task.state!=='completed';nodes.cancel.hidden=ended.has(task.state);
       nodes.cancel.disabled=ended.has(task.state)||task.label==='正在取消并清理';
-      nodes.errors.hidden=!task.error;nodes.text.textContent=task.error||'';
+      nodes.errors.hidden=!task.error;nodes.summary.textContent=task.state==='completed'?'清理警告':'错误详情';nodes.text.textContent=task.error||'';
     }
     function render() {
       const s=model.summary();$('batchProgress').value=s.progress;
       $('batchSummary').textContent=`共${s.total}项 · 完成${s.completed} · 失败${s.failed} · 取消${s.cancelled} · 跳过${s.skipped}`;
-      $('batchScheduling').textContent=paused?'排程已暂停，正在处理的任务会继续；不会派发新任务。':s.pending?'排程运行中，同时最多处理'+concurrency+'个任务。':'本批次已结束。';
+      const active=[...model.tasks.values()].filter(task=>['parsing','downloading','merging'].includes(task.state)).length;
+      $('batchScheduling').textContent=paused?'排程已暂停，正在处理的任务会继续；不会派发新任务。':s.pending?'排程运行中，同时最多处理'+concurrency+'个任务。'+(active>concurrency?'目前仍有'+active+'个任务处理中，不会中断；完成后按新上限派发。':''):'本批次已结束。';
       $('batchStart').textContent=[...model.tasks.values()].some(task=>task.state!=='queued')?'继续排程':'开始队列';
       $('batchStart').disabled=!paused||!s.pending;$('batchPause').disabled=paused||!s.pending;
       $('batchCancelAll').disabled=!s.pending;$('batchClear').disabled=!!s.pending;
@@ -59,7 +60,7 @@
     async function action(button,fn){button.disabled=true;try{await fn();}catch(e){error(e);}finally{render();if(button===$('batchAdd')||button===$('batchFolder'))button.disabled=false;}}
     $('batchAdd').onclick=()=>action($('batchAdd'),async()=>{
       const result=await api.batchAdd($('batchInput').value,{folder:getFolder(),access:$('batchAccess').value,maxHeight:Number($('batchQuality').value)});
-      message('已加入'+result.added.length+'项。'+(result.duplicates.length?'重复链接'+result.duplicates.length+'项，未加入。':'')+result.invalid.map(item=>'第'+item.line+'行：'+item.error).join('；'));
+      message('已加入'+result.added.length+'项。'+(result.resubmitted?.length?'其中'+result.resubmitted.length+'项为先前失败或取消的链接，已重新加入。':'')+(result.duplicates.length?'重复链接'+result.duplicates.length+'项，未加入。':'')+result.invalid.map(item=>'第'+item.line+'行：'+item.error).join('；'));
       if(result.added.length)$('batchInput').value='';apply(await api.batchState());
     });
     $('batchStart').onclick=()=>action($('batchStart'),async()=>{message('');apply(await ([...model.tasks.values()].some(task=>task.state!=='queued')?api.batchResume():api.batchStart()));});

@@ -58,7 +58,71 @@ test('cleanup occupies its slot and failure is reported without stopping other j
  const cleanup=deferred(),f=fixture({cleanup:async task=>{if(task.id===f.started[0]){await cleanup.promise;throw Error('cleanup failed');}}});f.add(2);f.queue.start();await turn();
  f.gates.get(f.started[0]).resolve();await turn();assert.equal(f.started.length,1);assert.equal(f.queue.state().running,1);
  cleanup.resolve();await turn();assert.equal(f.started.length,2);f.gates.get(f.started[1]).resolve();await f.done();
- assert.equal(f.queue.state().tasks[0].state,'failed');assert.match(f.queue.state().tasks[0].error,/cleanup/);assert.equal(f.queue.state().tasks[1].state,'completed');
+ const [published]=f.queue.state().tasks;assert.equal(published.state,'completed');assert.equal(published.file,published.input);assert.match(published.error,/cleanup/);assert.equal(f.queue.state().tasks[1].state,'completed');
+ const failing=fixture({cleanup:async()=>{throw Error('cleanup failed');}});failing.add(1);failing.queue.start();await turn();failing.gates.get(failing.started[0]).reject(Error('source failed'));await failing.done();
+ assert.equal(failing.queue.state().tasks[0].state,'failed');assert.match(failing.queue.state().tasks[0].error,/cleanup/);
+});
+test('single download resolves with its cleanup warning so the page can show it',async()=>{
+ const f=fixture({cleanup:async()=>{throw Error('cleanup failed');}}),pending=f.queue.addSingle({folder:path.resolve('test'),title:'single'});await turn();
+ f.gates.get(f.started[0]).resolve();const result=await pending;assert.equal(result.file,'single');assert.match(result.warning,/cleanup failed/);
+ const ok=fixture(),clean=ok.queue.addSingle({folder:path.resolve('test'),title:'clean'});await turn();ok.gates.get(ok.started[0]).resolve();assert.equal((await clean).warning,undefined);
+});
+test('raising concurrency mid-run dispatches at once, while paused changes wait for resume and lowering never aborts',async()=>{
+ const f=fixture();f.add(6);f.queue.start();await turn();assert.equal(f.started.length,1);
+ f.queue.setConcurrency(3);await turn();assert.equal(f.started.length,3);assert.equal(f.queue.state().running,3);
+ f.queue.setConcurrency(3);await turn();assert.equal(f.started.length,3);
+ f.queue.pause();f.gates.get(f.started[0]).resolve();await turn();assert.equal(f.started.length,3);assert.equal(f.queue.state().running,2);
+ f.queue.setConcurrency(2);f.queue.start();await turn();assert.equal(f.started.length,3);
+ f.gates.get(f.started[1]).resolve();await turn();assert.equal(f.started.length,4);assert.equal(f.queue.state().running,2);
+ f.queue.setConcurrency(1);assert.equal(f.queue.jobs.get(f.started[2]).task.controller.signal.aborted,false);assert.equal(f.queue.jobs.get(f.started[3]).task.controller.signal.aborted,false);
+ f.gates.get(f.started[2]).resolve();await turn();assert.equal(f.started.length,4);assert.equal(f.queue.state().running,1);
+ for(const value of [0,4,-1,2.5,null])assert.throws(()=>f.queue.setConcurrency(value),/1～3/);assert.equal(f.queue.state().concurrency,1);
+ f.gates.get(f.started[3]).resolve();await turn();assert.equal(f.started.length,5);f.queue.setConcurrency(3);await turn();assert.equal(f.started.length,6);
+ for(const id of f.started.slice(4))f.gates.get(id).resolve();await f.done();
+ assert.equal(f.queue.state().running,0);assert.ok(f.queue.state().tasks.every(task=>task.state==='completed'));
+});
+test('concurrency raised while a single download holds a slot still respects the shared limit',async()=>{
+ const f=fixture(),single=f.queue.addSingle({folder:path.resolve('test'),title:'single'});await turn();f.add(3);f.queue.start();await turn();
+ assert.equal(f.started.length,1);f.queue.setConcurrency(2);await turn();assert.equal(f.started.length,2);assert.equal(f.queue.state().running,2);
+ f.gates.get(f.started[0]).resolve();await single;await turn();assert.equal(f.started.length,3);
+ for(const id of f.started.slice(1))f.gates.get(id).resolve();await turn();f.gates.get(f.started[3]).resolve();await f.done();assert.equal(f.queue.state().running,0);
+});
+test('failed and cancelled links can be resubmitted, while active or completed links stay duplicates',async()=>{
+ const f=fixture();f.queue.setConcurrency(3);f.add(3);f.queue.start();await turn();const [a,b,c]=f.started;
+ await f.queue.cancel(a,true);f.gates.get(b).reject(Error('network'));f.gates.get(c).resolve();await f.done();
+ const again=f.add(3);assert.equal(again.added.length,2);assert.deepEqual(again.resubmitted.map(item=>item.line),[1,2]);assert.deepEqual(again.duplicates.map(item=>item.line),[3]);
+ await turn();assert.equal(f.started.length,5);assert.equal(f.add(1).duplicates.length,1);
+ for(const id of f.started.slice(3))f.gates.get(id).resolve();await f.done();
+ assert.deepEqual(f.queue.state().tasks.map(task=>task.state),['cancelled','failed','completed','completed','completed']);
+});
+test('a skipped alias can be resubmitted only after the task that owned the video fails',async()=>{
+ const f=fixture({prepare:async job=>({title:job.input,canonical:'bili:BV17x411w7KC'})});f.queue.setConcurrency(2);
+ f.queue.addBatch('https://b23.tv/eOYc04u\nBV17x411w7KC',{folder:path.resolve('test')});f.queue.start();await turn();await turn();
+ assert.equal(f.started.length,1);assert.equal(f.queue.state().tasks[1].state,'skipped');assert.equal(f.queue.addBatch('BV17x411w7KC',{folder:path.resolve('test')}).duplicates.length,1);
+ f.gates.get(f.started[0]).reject(Error('network'));await f.done();
+ const again=f.queue.addBatch('BV17x411w7KC',{folder:path.resolve('test')});assert.equal(again.resubmitted.length,1);await turn();await turn();
+ assert.equal(f.started.length,2);f.gates.get(f.started[1]).resolve();await f.done();assert.equal(f.queue.state().tasks.at(-1).state,'completed');
+});
+test('cancel arriving during post-download cleanup leaves the published file completed',async()=>{
+ const hold=deferred(),entered=deferred();let aborted;
+ const f=fixture({cleanup:async task=>{entered.resolve();await hold.promise;aborted=task.controller.signal.aborted;}});f.add(1);f.queue.start();await turn();
+ const id=f.started[0];f.gates.get(id).resolve();await entered.promise;const pending=f.queue.cancel(id,true);
+ assert.notEqual(f.queue.jobs.get(id).label,'正在取消并清理');hold.resolve();
+ assert.equal((await pending).cancelled,false);assert.equal(aborted,false);const [task]=f.queue.state().tasks;
+ assert.equal(task.state,'completed');assert.equal(task.file,task.input);assert.equal(task.progress,100);
+ await f.queue.cancelAll('batch');assert.equal(f.queue.state().tasks[0].state,'completed');
+});
+test('cancel-all during three filesystem transfers keeps finished output and removes every private directory',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'piku-batch-cancel-all-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const ready=deferred(),holds=new Map();let count=0;
+ const f=fixture({run:async(opts,task)=>{task.temp=await fs.mkdtemp(path.join(root,'.bilidown-'));const src=path.join(task.temp,'output');await fs.writeFile(src,task.id);task.target=path.join(root,task.id+'.mp4');
+  const hold=deferred();holds.set(task.id,hold);const abort=()=>hold.reject(task.controller.signal.reason);task.controller.signal.addEventListener('abort',abort,{once:true});task.controller.signal.throwIfAborted();if(++count===3)ready.resolve();
+  await hold.promise;task.controller.signal.removeEventListener('abort',abort);await moveOutputAtomically(src,task.target,()=>{task.ownedOutput=true;},fs,task.controller.signal);return {file:task.target};},cleanup:cleanupDownloadTask});
+ f.queue.setConcurrency(3);f.queue.addBatch(links(5),{folder:root});f.queue.start();await ready.promise;
+ const first=[...holds.keys()][0];holds.get(first).resolve();await f.queue.jobs.get(first).done;
+ await turn();await f.queue.cancelAll('batch');await f.done();
+ const states=f.queue.state().tasks.map(task=>task.state);assert.equal(states.filter(state=>state==='completed').length,1);assert.equal(states.filter(state=>state==='cancelled').length,4);
+ assert.deepEqual(await fs.readdir(root),[first+'.mp4']);assert.equal(f.queue.state().running,0);assert.equal(f.queue.state().paused,true);
 });
 test('canonical input duplicate detection covers tracking parameters and platform aliases',async()=>{
  const f=fixture();const result=f.queue.addBatch('https://youtu.be/jNQXAC9IVRw\nhttps://www.youtube.com/watch?v=jNQXAC9IVRw&t=5\nhttps://twitter.com/user/status/123\nhttps://x.com/i/web/status/123\nBV17x411w7KC\nhttps://www.bilibili.com/video/BV17x411w7KC/?x=1\nhttps://b23.tv/eOYc04u?a=1\nhttps://b23.tv/eOYc04u\nhttps://evil.invalid/video/BV17x411w7KC/',{folder:path.resolve('test')});
