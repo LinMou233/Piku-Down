@@ -4,3 +4,7 @@ function audioEncoding(format,copy=true){return format==='mp3'?['-vn','-c:a','li
 module.exports={frameRate,selectVideo,audioEncoding};
 async function selectBestVideo(streams,quality,probe){const candidates=streams.filter(stream=>stream.id===Number(quality));if(candidates.length<2)return selectVideo(candidates,quality);const results=await Promise.allSettled(candidates.map(probe));const measured=candidates.map((stream,i)=>({...stream,frameRate:results[i].status==='fulfilled'&&results[i].value?.fps>0?String(results[i].value.fps):stream.frameRate??stream.frame_rate}));return selectVideo(measured,quality);}
 module.exports.selectBestVideo=selectBestVideo;
+// Win7 Media Player only decodes H.264 (B站 codecid 7) up to 1920x1088.
+function win7Playable(stream){return stream.codecid===7&&(Number(stream.width)||0)<=1920&&(Number(stream.height)||0)<=1088;}
+function playableStreams(streams,win7){return win7?streams.filter(win7Playable):streams;}
+module.exports.win7Playable=win7Playable;module.exports.playableStreams=playableStreams;

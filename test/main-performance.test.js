@@ -13,9 +13,9 @@ const tasks = require('../download-task');
 const { createAuthGate } = require('../auth');
 const { safeName } = require('../core');
 
-function formatsFixture(play) {
+function formatsFixture(play, legacyRuntime = false) {
   const handlers = new Map();
-  const context = vm.createContext({ handle: (name, callback) => handlers.set(name, callback), isExternal: key => key.startsWith('external:'), externalMedia: { formats: () => ({ external: true }) }, play, ...media });
+  const context = vm.createContext({ handle: (name, callback) => handlers.set(name, callback), isExternal: key => key.startsWith('external:'), externalMedia: { formats: () => ({ external: true }) }, play, legacyRuntime, ...media });
   vm.runInContext(source.slice(source.indexOf("handle('formats',"), source.indexOf("handle('cancel',")), context);
   return handlers.get('formats');
 }
@@ -26,6 +26,16 @@ test('formats issues one DASH request even if accepted qualities have no accessi
   assert.equal(calls.length, 1);
   assert.deepEqual(Array.from(result.video, item => item.available), [true, false, false, false]);
   assert.equal(result.audio, true);
+});
+test('Win7 formats offer only qualities with an H.264 stream up to 1080p, including non-DASH sources', async () => {
+  const dash = { dash: { video: [{ id: 120, codecid: 12, width: 3840, height: 2160 }, { id: 116, codecid: 12, width: 1920, height: 1080 }, { id: 80, codecid: 13, width: 1920, height: 1080 }, { id: 80, codecid: 7, width: 1920, height: 1080 }, { id: 64, codecid: 7, width: 1280, height: 720 }], audio: [{}] },
+    accept_quality: [120, 116, 80, 64], accept_description: ['4K', '1080P60', '1080P', '720P'] };
+  assert.deepEqual(Array.from((await formatsFixture(async () => dash, true)(null, 'BV1', 1)).video, item => item.available), [false, false, true, true]);
+  assert.deepEqual(Array.from((await formatsFixture(async () => dash)(null, 'BV1', 1)).video, item => item.available), [true, true, true, true]);
+  for (const [quality, available] of [[116, true], [120, false]]) {
+    const durl = async (bvid, cid, qn) => qn ? Promise.reject(Error('no dash')) : { durl: [{}], quality, accept_quality: [quality], accept_description: ['x'] };
+    assert.equal((await formatsFixture(durl, true)(null, 'BV1', 1)).video[0].available, available);
+  }
 });
 test('formats preserves non-DASH compensation, tolerates failures and delegates external formats', async () => {
   const calls = [];
@@ -59,7 +69,7 @@ async function downloadFixture(t, cancelAtMove = false) {
   let history = [], context, apiCalls = 0, externalCalls = 0;
   const stream = key => ({ baseUrl: key, id: 80, bandwidth: 100 });
   const progress = value => events.push(value);
-  context = vm.createContext({ ...helpers, ...media, ...tasks, fs, path, safeName, AbortController, active: null, activeTask: null, app: { getPath: () => root }, defaultSettings: {}, readData: async () => ({ downloadDir: root }), updateData: async (name, update) => { history = update(history); }, handle: (name, callback) => handlers.set(name, callback), isExternal: value => value.startsWith('external:'), play: async () => { apiCalls++; return { dash: { video: [stream('video')], audio: [stream('audio')] } }; }, mediaBinary: () => 'fixture-ffmpeg', inspectMedia: async () => ({ width: 1920, height: 1080, fps: 60 }), transfer: helpers.createTransfer({ fetch: async key => ({ ok: true, headers: { get: () => '5' }, body: Readable.from([Buffer.from(key)]) }) }), externalProgress: progress, win: { webContents: { send: (channel, value) => progress(value) } }, downloadExternal: async () => { externalCalls++; return { file: 'external-result' }; }, moveOutputAtomically: (src, target, onCreated, io, signal) => helpers.moveOutputAtomically(src, target, () => { onCreated(); if (cancelAtMove) context.active.abort(Error('stop at move')); }, io, signal), spawn(command, args) {
+  context = vm.createContext({ ...helpers, ...media, ...tasks, fs, path, safeName, AbortController, legacyRuntime: false, active: null, activeTask: null, app: { getPath: () => root }, defaultSettings: {}, readData: async () => ({ downloadDir: root }), updateData: async (name, update) => { history = update(history); }, handle: (name, callback) => handlers.set(name, callback), isExternal: value => value.startsWith('external:'), play: async () => { apiCalls++; return { dash: { video: [stream('video')], audio: [stream('audio')] } }; }, mediaBinary: () => 'fixture-ffmpeg', inspectMedia: async () => ({ width: 1920, height: 1080, fps: 60 }), transfer: helpers.createTransfer({ fetch: async key => ({ ok: true, headers: { get: () => '5' }, body: Readable.from([Buffer.from(key)]) }) }), externalProgress: progress, win: { webContents: { send: (channel, value) => progress(value) } }, downloadExternal: async () => { externalCalls++; return { file: 'external-result' }; }, moveOutputAtomically: (src, target, onCreated, io, signal) => helpers.moveOutputAtomically(src, target, () => { onCreated(); if (cancelAtMove) context.active.abort(Error('stop at move')); }, io, signal), spawn(command, args) {
     commands.push({ command, args });
     const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => child.emit('close', 1);
     fs.writeFile(args.at(-1), 'merged-output').then(() => child.emit('close', 0), error => child.emit('error', error));

@@ -22,10 +22,19 @@ function parseExternalUrl(input) {
   return { platform: 'youtube', url: `https://www.youtube.com/watch?v=${id}` };
 }
 
-function videoFormats(info) {
+// Win7 Media Player only decodes H.264 up to 1920x1088 with AAC audio. X's direct MP4s omit
+// codec fields but are always H.264/AAC, so a blank codec on an mp4 counts as playable.
+function win7Playable(format) {
+  const video = format.vcodec ? /^(avc1|h264)/i.test(format.vcodec) : format.ext === 'mp4';
+  const audio = !format.acodec || format.acodec === 'none' || /^(mp4a|aac)/i.test(format.acodec);
+  return video && audio && (Number(format.width) || 0) <= 1920 && (Number(format.height) || 0) <= 1088;
+}
+
+function videoFormats(info, { win7Playback = false } = {}) {
   const choices = new Map();
   for (const format of info.formats || []) {
     if (format.vcodec === 'none' || (!format.vcodec && !format.height && !format.width) || /^iamf/i.test(format.acodec || '') || format.has_drm || !format.url || !/^[\w.-]+$/.test(format.format_id || '') || format.ext === 'mhtml') continue;
+    if (win7Playback && !win7Playable(format)) continue;
     const height = Number(format.height) || 0;
     const fps = Number(format.fps) || 0;
     const hdr = !!format.dynamic_range && !['SDR', 'unknown'].includes(format.dynamic_range);
@@ -41,7 +50,7 @@ function videoFormats(info) {
   return [...choices.values()].sort((a, b) => b.height - a.height || b.fps - a.fps || b.score - a.score);
 }
 
-function entriesFromInfo(info) {
+function entriesFromInfo(info, options) {
   if (info.is_live || ['is_live', 'is_upcoming', 'post_live'].includes(info.live_status)) throw new UserError('请在直播结束并完成处理后再下载');
   const source = info.entries || [info];
   const entries = source.slice(0, 20).map((item, index) => item && ({
@@ -50,7 +59,7 @@ function entriesFromInfo(info) {
     owner: String(item.uploader || item.channel || info.uploader || ''),
     cover: String(item.thumbnail || info.thumbnail || ''),
     duration: Number(item.duration) || 0,
-    video: videoFormats(item),
+    video: videoFormats(item, options),
     // Some X MP4 entries omit codec metadata; allow extraction and let FFmpeg
     // report a missing audio track rather than hiding audio for all such clips.
     audio: (item.formats || []).some(f => !f.has_drm && f.acodec !== 'none' && !/^iamf/i.test(f.acodec || '') && f.ext !== 'mhtml')
@@ -62,6 +71,8 @@ function entriesFromInfo(info) {
 function readableError(error, platform) {
   if (error instanceof UserError) return error;
   const name = platform === 'x' ? 'X' : 'YouTube';
+  // A Win7 machine without the loader and UCRT updates cannot start the bundled Python runtime.
+  if (/Failed to load Python DLL|LoadLibrary|api-ms-win-crt|vcruntime|procedure could not be found|spawn UNKNOWN/i.test(error.message)) return Error('下载组件无法在此系统启动。Windows7 SP1请先安装KB2533623与KB2999226（通用C运行库），或安装最新的Windows7累积更新后重试。');
   if (/does not contain any audio|no audio|audio codec.*none/i.test(error.message)) return Error('这个视频没有可用音轨，请改为下载视频');
   if (/sign in|login|log in|confirm your age|authentication|cookies/i.test(error.message)) return Error(`${name} 访问失败。若网页要求登录，请导入有效 Cookie，并选择“使用登录状态”重新解析。`);
   if (/private|not available|unavailable|removed|deleted|restricted|403|404/i.test(error.message)) return Error(`${name} 视频无法访问，请确认链接、账号权限和地区限制。`);
@@ -79,10 +90,10 @@ function progressFromLine(line) {
   } catch { return null; }
 }
 
-function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.execPath, run = runProcess, progress = () => {} }) {
+function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = 'node:' + process.execPath, win7Playback = false, run = runProcess, progress = () => {} }) {
   const cache = new Map();
   const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', PYTHONIOENCODING: 'utf-8' };
-  const common = () => ['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--no-warnings', '--no-cache-dir', '--encoding', 'utf-8', '--no-color', '--socket-timeout', '25', '--retries', '2', '--fragment-retries', '2', '--no-js-runtimes', '--js-runtimes', `node:${jsRuntime}`];
+  const common = () => ['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--no-warnings', '--no-cache-dir', '--encoding', 'utf-8', '--no-color', '--socket-timeout', '25', '--retries', '2', '--fragment-retries', '2', '--no-js-runtimes', '--js-runtimes', jsRuntime];
   async function withCookies(record, callback) {
     if (record.access === 'public') return callback([]);
     const cookies = await auth.cookies(record.platform);
@@ -116,7 +127,7 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
       temporary = await fs.mkdtemp(path.join(root, 'parse-'));
       const json = await withCookies(record, cookies => run(executable, [...common(), ...cookies, '--dump-single-json', '--skip-download', '--playlist-items', '1:20', '--', source.url], { timeout: 120000, signal, env }));
       const info = JSON.parse(json);
-      record.entries = entriesFromInfo(info);
+      record.entries = entriesFromInfo(info, { win7Playback });
       const key = 'external:' + randomUUID();
       while (cache.size >= 20) cache.delete(cache.keys().next().value);
       cache.set(key, record);
@@ -140,7 +151,7 @@ function createExternalMedia({ runtime, auth, root, ffmpeg, jsRuntime = process.
     try {
       const executable = await runtime.ensure(signal, report);
       const audioSelector = record.platform === 'x' ? 'bestaudio/best' : 'bestaudio[acodec!^=iamf]/best[acodec!^=iamf]';
-      const selection = audioOnly ? ['-f', audioSelector, '-x', '--audio-format', extension, '--audio-quality', extension === 'mp3' ? '320K' : '0'] : ['-f', format.hasAudio ? format.id : `${format.id}+bestaudio[ext=m4a][acodec!^=iamf]/${format.id}+bestaudio[acodec!^=iamf]/${format.id}`, '--merge-output-format', 'mp4', '--remux-video', 'mp4'];
+      const selection = audioOnly ? ['-f', audioSelector, '-x', '--audio-format', extension, '--audio-quality', extension === 'mp3' ? '320K' : '0'] : ['-f', format.hasAudio ? format.id : win7Playback ? `${format.id}+bestaudio[acodec^=mp4a]/${format.id}` : `${format.id}+bestaudio[ext=m4a][acodec!^=iamf]/${format.id}+bestaudio[acodec!^=iamf]/${format.id}`, '--merge-output-format', 'mp4', '--remux-video', 'mp4'];
       let lastProgress = 0;
       await withCookies(record, cookies => run(executable, [...common(), ...cookies, ...selection, '--ffmpeg-location', ffmpeg(), '--playlist-items', String(entry.index), '--no-simulate', '--no-overwrites', '--newline', '--progress', '--progress-template', 'download:PIKU_PROGRESS:%(progress)j', '-o', path.join(task.temp, 'media.%(ext)s'), '--', record.url], {
         signal, env,

@@ -75,7 +75,7 @@ $('accessMode').onchange = () => {
 };
 if (typeof bili.externalState === 'function') refreshExternalState().catch(error => { $('externalStatus').textContent = error.message; });
 if (bili.legacy || (typeof externalEvents !== 'undefined' && externalEvents.arch !== 'x64')) {
-  const label = bili.legacy ? 'Win7 兼容版' : externalEvents.arch === 'ia32' ? 'x86（ia32）版' : 'ARM64 版';
+  const label = bili.legacy ? 'Win7兼容版' : externalEvents.arch === 'ia32' ? 'x86（ia32）版' : 'ARM64 版';
   $('buildNotice').hidden = false;
-  $('buildNotice').textContent = label + '：未经对应系统或架构的实机测试。' + (bili.legacy ? '此版本不提供 X 与 YouTube 下载，请使用现代版。' : '如遇问题，请附上系统版本和视频链接。');
+  $('buildNotice').textContent = label + '：未经对应系统或架构的实机测试。' + (bili.legacy ? 'X与YouTube为实验功能，使用社区维护的Win7版下载组件与quickjs-ng；Windows7 SP1需先安装KB2533623与KB2999226。' : '如遇问题，请附上系统版本和视频链接。');
 }

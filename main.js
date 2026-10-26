@@ -5,7 +5,7 @@ const { spawn } = require('node:child_process');
 const { parseId, safeName } = require('./core');
 const { createLibrary } = require('./library');
 const { createAuthGate } = require('./auth');
-const {frameRate,selectVideo,selectBestVideo,audioEncoding}=require('./media');
+const {frameRate,selectVideo,selectBestVideo,audioEncoding,playableStreams}=require('./media');
 const {inspectMedia}=require('./probe');
 const {createDownloadTask,cleanupDownloadTask}=require('./download-task');
 const {sessionFetch,abortScope}=require('./network');
@@ -32,10 +32,10 @@ if (!primaryInstance) app.quit();
 app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); } });
 const externalLifetime = new AbortController();
 const pendingExternal = new Set();
-const externalRuntime = createExternalRuntime({ root: externalRoot, supported: !legacyRuntime, fetch: (url, options) => sessionFetch(session.defaultSession, url, options, net) });
+const externalRuntime = createExternalRuntime({ root: externalRoot, legacy: legacyRuntime, fetch: (url, options) => sessionFetch(session.defaultSession, url, options, net) });
 const externalAuth = createExternalAuth({ root: externalRoot, safeStorage, clearLegacyX: () => session.fromPartition('persist:piku-x').clearStorageData() });
 const externalProgress = value => { if (win && !win.isDestroyed()) win.webContents.send('progress', value); };
-const externalMedia = createExternalMedia({ runtime: externalRuntime, auth: externalAuth, root: path.join(externalRoot, 'external-temp'), ffmpeg: mediaBinary, progress: externalProgress });
+const externalMedia = createExternalMedia({ runtime: externalRuntime, auth: externalAuth, root: path.join(externalRoot, 'external-temp'), ffmpeg: mediaBinary, progress: externalProgress, win7Playback: legacyRuntime, ...(externalRuntime.jsRuntime && { jsRuntime: externalRuntime.jsRuntime }) });
 const isExternal = value => typeof value === 'string' && value.startsWith('external:');
 function idleAccounts() { if (downloads.hasWork()) throw Error('请在下载结束后更改登录状态'); }
 handle('externalState', async () => ({ accounts: await externalAuth.status(), runtime: await externalRuntime.status() }));
@@ -106,12 +106,13 @@ async function parseInput(input,options={},signal,progress=externalProgress){
 handle('formats',(_,bvid,cid)=>getFormats(bvid,cid));
 async function getFormats(bvid,cid,signal){
  if (isExternal(bvid)) return externalMedia.formats(bvid,cid);
- const data=await play(bvid,cid,undefined,signal);const streams=[...(data.dash?.video||[])];const accepted=data.accept_quality||[];
+ // Win7 builds keep only streams its Media Player can play: H.264 up to 1080p (B站 qn 116 is 1080P60).
+ const data=await play(bvid,cid,undefined,signal);const streams=[...playableStreams(data.dash?.video||[],legacyRuntime)];const accepted=data.accept_quality||[];
  if(!data.dash){
   const missing=[120,116,74].filter(id=>accepted.includes(id)&&!streams.some(stream=>stream.id===id));
-  const results=await Promise.allSettled(missing.map(id=>play(bvid,cid,id,signal)));for(const result of results){if(result.status==='fulfilled')streams.push(...(result.value.dash?.video||[]));}
+  const results=await Promise.allSettled(missing.map(id=>play(bvid,cid,id,signal)));for(const result of results){if(result.status==='fulfilled')streams.push(...playableStreams(result.value.dash?.video||[],legacyRuntime));}
  }
- return {video:accepted.map((id,i)=>{const selected=selectVideo(streams,id);return {id,label:data.accept_description[i],available:!!selected||(!data.dash&&data.quality===id),fps:selected?frameRate(selected):0};}),audio:!!data.dash?.audio?.length||!!data.durl?.length};
+ return {video:accepted.map((id,i)=>{const selected=selectVideo(streams,id);return {id,label:data.accept_description[i],available:!!selected||(!data.dash&&data.quality===id&&(!legacyRuntime||id<=116)),fps:selected?frameRate(selected):0};}),audio:!!data.dash?.audio?.length||!!data.durl?.length};
 }
 handle('cancel',(_,taskId)=>downloads.cancel(taskId));
 handle('cancelAndDelete',async(event,taskId)=>{if(event.sender!==win?.webContents)throw Error('无效的窗口请求');return downloads.cancel(taskId,true);});
@@ -139,7 +140,7 @@ async function runDownload(opts,task,progress){
  else if(d.durl?.length){for(let i=0;i<d.durl.length;i++)await transfer([d.durl[i].url,...(d.durl[i].backup_url||[])],path.join(temp,'seg'+i),signal,'读取分段音轨 '+(i+1)+'/'+d.durl.length);await fs.writeFile(path.join(temp,'list.txt'),d.durl.map((_,i)=>"file 'seg"+i+"'").join('\n'));args=['-f','concat','-safe','0','-i',path.join(temp,'list.txt'),...audioEncoding(extension,false)];}
  else throw Error('这个视频暂时没有可下载的音轨');
  }else if(d.dash){
- progress({label:'正在检测原始视频帧率',received:0,total:0});const video=await selectBestVideo(d.dash.video,opts.qn,stream=>{const url=stream.baseUrl||stream.base_url;return inspectMedia(ffmpeg,url,{remote:true,signal});});
+ progress({label:'正在检测原始视频帧率',received:0,total:0});const video=await selectBestVideo(playableStreams(d.dash.video,legacyRuntime),opts.qn,stream=>{const url=stream.baseUrl||stream.base_url;return inspectMedia(ffmpeg,url,{remote:true,signal});});
  const audio=[...(d.dash.audio||[])].sort((a,b)=>b.bandwidth-a.bandwidth)[0];
  if(!video)throw Error('当前账号无法下载所选清晰度，请重新解析或登录');
  await downloadDashStreams({video,audio,folder:temp,signal,transfer,progress});
