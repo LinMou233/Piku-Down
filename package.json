@@ -12,7 +12,7 @@
     "build:arm64": "tauri build --target aarch64-pc-windows-msvc",
     "build:all": "pnpm build:x64 && pnpm build:x86 && pnpm build:arm64",
     "test": "cargo test -p piku-core && node --test test/*.test.js",
-    "test:legacy": "node --test test/*.test.js",
+    "test:ui": "node --test test/*.test.js",
     "tauri": "tauri"
   },
   "devDependencies": {
