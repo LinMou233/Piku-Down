@@ -1,0 +1,17 @@
+[package]
+name = "piku-down"
+version = "1.7.0"
+edition = "2021"
+license = "MIT"
+[lib]
+name = "piku_desktop"
+crate-type = ["rlib"]
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+[dependencies]
+piku-core = { path = "../crates/piku-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }

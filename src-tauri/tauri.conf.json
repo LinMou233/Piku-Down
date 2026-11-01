@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Piku Down Tauri",
+  "version": "1.7.0",
+  "identifier": "local.piku.down.tauri",
+  "build": {
+    "beforeDevCommand": "node scripts/prepare-tauri.cjs",
+    "beforeBuildCommand": "node scripts/prepare-tauri.cjs",
+    "frontendDist": "../.tauri-ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data: https://*.hdslb.com https://*.ytimg.com https://pbs.twimg.com https://video.twimg.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["../resources/icon.ico"],
+    "windows": {"webviewInstallMode":{"type":"downloadBootstrapper","silent":true},"nsis":{"installMode":"currentUser","languages":["SimpChinese","English"],"displayLanguageSelector":true}}
+  }
+}

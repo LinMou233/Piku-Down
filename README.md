@@ -1,4 +1,129 @@
-# Piku Down 1.6.3
+# Piku Down 1.7.0
+
+Windows视频与音频下载工具，支持B站、X（Twitter）与YouTube。1.7.0将主程序迁移至Tauri2＋Rust，保留原有单视频与批次下载界面。
+
+## 本次更新
+
+- Rust负责平台API、账号状态、下载组件、任务调度、进度、取消、文件发布、设置与历史，成品不再启动Electron或Node.js业务进程。
+- 单视频与批次共用1～3个并发名额，每项拥有独立taskId、取消令牌、暂存目录与输出所有权；保留失败／取消任务重新提交、收尾取消保护与清理警告。
+- NTFS保留硬链接快速路径；跨卷与FAT32先完整复制到目标卷的唯一暂存目录，再以不替换目标的方式发布。同名文件不会被覆盖，清理范围限定为当前任务拥有的文件。
+- 重复关闭请求等待同一次任务清理，结束后关闭二维码与主窗口；Windows文件定位改用ShellAPI，打开目录时选中输出文件。
+- 下载组件固定版本并校验SHA256，首次使用时按需下载。主程序缩小不代表媒体组件占用消失。
+
+## 下载选择
+
+| 系统与架构 | 免安装版 | 安装版 |
+| --- | --- | --- |
+| Windows11 x64 | 已完成下述核心GUI验收 | 已编译，安装／升级／卸载待测 |
+| Windows10 x64 | 已编译，待实机测试 | 已编译，待实机测试 |
+| Windows10 x86（ia32） | **待测** | **待测** |
+| Windows10／Windows11 ARM64 | **待测** | **待测** |
+
+提供3种架构，共6个EXE。文件名含`Setup`的是安装版，其余EXE为免安装版；SHA256SUMS.txt可核对文件哈希。x86与ARM64构建供协助测试和反馈问题，编译通过不代表目标系统运行通过。x86目标系统只列Windows10；本次1.7.0不提供Win7构建，Win7继续使用1.6.3s兼容分支。
+
+## 使用方式
+
+1. B站先在设置中扫码登录；支持BV、av号、完整链接与b23.tv短链接。
+2. X与YouTube默认公开访问。需要账号权限时，先导入对应平台Cookie，再在解析页选择“使用登录状态”。
+3. 单视频模式可选择分P／视频、画质、视频或音频输出；支持MP4、M4A与MP3。
+4. 批次模式每行粘贴一个链接，选择画质上限与并发数后加入队列。每个链接处理第一个分P／视频，单项失败不影响后续任务。
+5. 暂停排程只停止派发新任务，正在传输的任务继续运行；支持继续排程、取消单项与取消全部。完成后可打开文件位置。
+
+### Cookie导入
+
+Cookie档案由使用者自行汇出与提供。程式在本地使用该档案进行需要登入的下载操作，不会主动上传Cookie至开发者伺服器。请妥善保管Cookie档案，避免分享给他人。
+
+1. 在浏览器中登录X或YouTube，可使用[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)导出对应站点的Netscape格式cookies.txt。
+2. 在软件设置的对应平台中点击“导入Cookie”，选择导出的文件。
+3. 默认只在本次运行中使用；勾选“记住Cookie”后才使用Windows DPAPI加密保存在本机。取消勾选或“清除Cookie”可删除软件保存的副本，不会删除自行导出的原文件。
+4. 解析时选择“使用登录状态”。Cookie仅由本机程序及下载组件用于访问对应平台，不用于向开发者服务器或其他服务上传。
+
+Cookie可能过期；私人、年龄限制、会员内容等仍取决于账号权限与平台当时的限制，导入Cookie不代表一定能下载。请勿在截图、日志或Issue中附上密码、Cookie内容或Token。
+
+Tauri版使用独立配置目录，与旧Electron安装并存。首次启动只尝试迁移非凭证设置与下载历史，不复制旧Electron登录凭证或壁纸，登录与Cookie需要重新提供。免安装指无需运行安装器，配置与媒体组件仍写入当前账号的应用数据目录。
+
+## 体积与运行依赖
+
+| x64项目 | 本轮结果 |
+| --- | ---: |
+| 免安装主程序 | 6,138,368字节，约5.85MiB |
+| NSIS安装包 | 2,047,644字节，约1.95MiB |
+| FFmpeg | 82,797,568字节，约79MiB |
+| FFmpeg＋yt-dlp＋QuickJS缓存 | 102,829,042字节，约98.07MiB |
+| 主程序＋上述组件 | 约103.92MiB |
+
+主要省下的是随Electron附带的浏览器运行环境。FFmpeg仍保留，改为首次使用时另行下载，不放进主程序EXE。上表不含配置、下载文件、WebView2缓存与系统共享WebView2运行时，不能将约2MB安装包当作完整运行占用。缺少WebView2时，安装器会下载安装引导程序，不捆绑固定版浏览器引擎。
+
+ARM64主程序、yt-dlp与FFmpeg为ARM64构建；QuickJS暂用官方x86构建，依赖目标系统的x86模拟能力，这个组合仍待实机验证。
+
+## 架构与构建
+
+Rust业务核心位于`crates/piku-core`，不依赖Tauri、wry、WebView2或其他GUI框架。`DesktopHost`只提供窗口、对话框、事件与路径边界；`src-tauri`负责桌面适配，`ui/tauri-bridge.js`衔接原有bili、login与downloadEvents接口。未来更换原生RustGUI时可保留核心、替换适配器，本次不实现第二套GUI。旧Electron后端暂留作对照，不进入默认构建或成品。
+
+构建需要Rust的MSVC工具链、Visual Studio C++构建工具、Windows SDK、Node.js与pnpm。Node.js与pnpm只在构建时使用。构建x86／ARM64时需安装对应Rust target与C++工具链支持。
+
+本轮工具链为Rust1.99.1、Tauri2.12.5、Tauri CLI2.12.4与Visual Studio2022 C++构建工具。终端需能找到cargo。
+
+```powershell
+pnpm install --frozen-lockfile
+cargo test -p piku-core
+cargo clippy -p piku-down --all-targets -- -D warnings
+node --test test/*.test.js
+pnpm build:x64
+pnpm build:x86
+pnpm build:arm64
+```
+
+主程序位于对应`target/<target>/release/piku-down.exe`，NSIS安装包位于`release/bundle/nsis`。同时构建3种架构可运行`pnpm build:all`。
+
+### 下载组件来源
+
+- [yt-dlp2026.10.21](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.21)。
+- [QuickJS-NG0.17.0与许可](https://github.com/quickjs-ng/quickjs/releases/tag/v0.17.0)。
+- x64／x86的FFmpeg来自[ffmpeg-static](https://github.com/eugeneware/ffmpeg-static/releases)，分别固定b6.1.1与b4.4.1。
+- ARM64的FFmpeg来自[BtbN固定构建](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-01-12-49)，使用GPL构建。组件许可与对应源码见各发行页，主程序不重新分发这些媒体二进制。
+
+组件版本与SHA256在Rust中固定；更新组件时需要一并核对来源、许可与哈希。
+
+## 本轮验证
+
+记录日期：2026-11-02。基线为1.6.3的c8816c7。实际GUI环境为Windows11 Pro for Workstations，10.0.26300，x64。
+
+| 检查 | 结果与范围 |
+| --- | --- |
+| Rust核心测试 | 50项通过，含任务隔离、取消、文件所有权、缓存、凭证、HTTP故障注入与重复关闭等待 |
+| JavaScript回归 | 181项通过、2项跳过，共183项，无失败 |
+| 真实FAT32原生文件测试 | 9项通过，含NTFS↔FAT32、竞争、复制失败／磁盘不足注入、取消与清理 |
+| 格式与Clippy | 通过；Clippy执行all-targets并以-D warnings检查 |
+| 三架构构建 | 6个EXE的版本、主程序PE架构与哈希核对通过，不等同实机运行 |
+| 最终x64成品GUI | NTFS与FAT32各完成BV、b23.tv、X、YouTube混合下载；8份文件全长解码通过、同源哈希一致；另2份单视频输出也通过解码 |
+
+最终x64主程序SHA256为`92BBCD76A534C75DD0246E4D1E223AA95977A1C13E548A16BDE5BA643B8C7A82`。GUI另覆盖无效来源失败隔离、暂停／继续、暂停中从1调至3不自动派发、现有YouTube Cookie下载、保存路径、Explorer选中文件、Media Player实际播放、重启历史与解析阶段关闭清理。
+
+JavaScript跳过项为旧Electron打包清单与未提供旧x86媒体二进制的兼容样本检查。保留的旧后端测试不能替代Rust或GUI验收；磁盘不足使用故障注入，未填满测试磁盘。
+
+传输中取消的GUI实测来自较早1.7.0候选：观察到部分传输后取消，正式文件不存在、任务暂存目录清空。最终成品尚未独立重复全部取消时序，不能将旧候选或旧Electron结论写成最终成品GUI通过。重复关闭等待清理有确定性自动测试；一次GUI关闭时下载先完成，重启后文件与历史保留，未记为取消成功。
+
+## 已知限制与待测
+
+- 队列暂不提供重启恢复或断点续传；强制结束后下载暂存目录可能残留，不保证断电或强制终止后的事务原子性。
+- FAT32仍受单文件大小限制。exFAT与任意网络文件系统尚无本轮实机通过结论。
+- 15秒媒体看门狗仅检测无新数据停滞，不代表最低速度或总时限；组件请求另设25秒首响应与body无数据超时。
+- MP4保留源编码，可能包含HEVC等编码，播放能力取决于播放器与解码器。
+- Windows子进程启动后才加入JobObject，极短时间窗口内的孙进程归属竞态未做故障注入。
+
+- [ ] Windows10 x64实机运行。
+- [ ] Windows10 x86（ia32）与Windows ARM64实机运行，含下载组件组合。
+- [ ] 1.7.0安装、覆盖升级、卸载与安装后完整占用测量。
+- [ ] 最终成品传输中单项／全部取消、混合单个与批次动态并发、收尾清理警告GUI复验。
+- [ ] exFAT、网络共享目录、异常退出后状态一致性。
+- [ ] B站收藏、稍后再看、全部分P、全部设置项与更多平台账号权限场景的逐项GUI验收。
+
+反馈问题时请注明系统版本、架构、安装版或免安装版、文件系统、来源平台、重现步骤与错误提示，并遮挡个人信息。不要附上凭证内容。
+
+<details>
+<summary>1.6.3说明与历史记录（不代表1.7.0验证结果）</summary>
+
 
 Windows 视频与音频下载工具，支持 B站、X（Twitter）和 YouTube。提供 x64、x86（ia32）、ARM64 构建及实验性的 Win7 兼容构建。
 
@@ -322,3 +447,5 @@ ARM64 改为 Piku-Down-1.5.3-arm64.zip，完整解压到本地文件夹后运行
 ### ARM64 EXE 分发修正（1.5.3）
 
 ARM64 恢复安装版 Setup EXE 和单文件免安装 EXE，另保留 ZIP。安装版使用 ZIP 解压路径，便携版使用独立 NSIS 原生解压启动器，显示解压进度与启动失败/退出代码提示，不依赖 Nsis7z 插件。便携版双击后会解压到本次进程私有临时目录并启动应用，关闭应用后清理该临时目录。安装版正常卸载自动清理应用数据，覆盖升级保留。构建机无法运行 ARM64 程序，仍需 Windows ARM64 实机验证。
+
+</details>

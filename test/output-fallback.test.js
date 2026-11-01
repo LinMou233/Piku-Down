@@ -143,7 +143,9 @@ test('ownership survives source unlink failure after fallback rename for later c
   controller.abort(); await cleanupDownloadTask(task); await absent(target); await fs.access(source);
 });
 
-test('shared publisher is packaged and the previous bili-download export remains compatible', () => {
+test('previous bili-download export remains compatible', () => {
   assert.equal(require('../bili-download').moveOutputAtomically, moveOutputAtomically);
+});
+test('Electron package includes the shared publisher', {skip: !require('../package.json').build && 'Tauri构建不使用Electron打包清单'}, () => {
   assert.ok(require('../package.json').build.files.includes('output-file.js'));
 });
