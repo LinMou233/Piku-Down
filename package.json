@@ -1,87 +1,21 @@
 {
-  "name": "bili-desktop",
-  "version": "1.6.3",
-  "description": "Piku Down · Bilibili、X 与 YouTube 视频下载工具",
-  "main": "main.js",
-  "author": "@灵眸闪熠",
+  "name": "piku-down-tauri",
+  "version": "1.7.0",
+  "private": true,
+  "description": "Piku Down Tauri2＋Rust迁移版",
   "license": "MIT",
-  "dependencies": {
-    "ffmpeg-static": "^5.2.0",
-    "qrcode": "^1.5.4"
-  },
-  "productName": "Piku Down",
   "scripts": {
-    "start": "electron .",
-    "test": "node --test test/*.test.js",
-    "dist": "node scripts/build-release.cjs x64",
-    "dist:arm64": "node scripts/build-release.cjs arm64",
-    "dist:x86": "node scripts/build-release.cjs ia32",
-    "dist:win7": "node scripts/build-release.cjs ia32 --legacy",
-    "dist:win7:x64": "node scripts/build-release.cjs x64 --legacy"
+    "start": "tauri dev",
+    "build": "tauri build",
+    "build:x64": "tauri build --target x86_64-pc-windows-msvc",
+    "build:x86": "tauri build --target i686-pc-windows-msvc",
+    "build:arm64": "tauri build --target aarch64-pc-windows-msvc",
+    "build:all": "pnpm build:x64 && pnpm build:x86 && pnpm build:arm64",
+    "test": "cargo test -p piku-core && node --test test/*.test.js",
+    "test:legacy": "node --test test/*.test.js",
+    "tauri": "tauri"
   },
   "devDependencies": {
-    "electron": "^42.0.0",
-    "electron-builder": "^26.0.12"
-  },
-  "build": {
-    "appId": "local.bili.desktop",
-    "productName": "Piku Down",
-    "asarUnpack": [
-      "node_modules/ffmpeg-static/ffmpeg.exe"
-    ],
-    "files": [
-      "main.js",
-      "preload.js",
-      "core.js",
-      "ui/**/*",
-      "node_modules/**/*",
-      "library.js",
-      "auth.js",
-      "media.js",
-      "login-preload.js",
-      "probe.js",
-      "download-task.js",
-      "download-queue.js",
-      "bili-download.js",
-      "output-file.js",
-      "network.js",
-      "media-binary.js",
-      "external-media.js",
-      "external-runtime.js",
-      "external-auth.js",
-      "process-runner.js",
-      "user-error.js",
-      "resources/icon.ico",
-      "resources/icons/icon-32.png",
-      "resources/icons/icon-64.png"
-    ],
-    "win": {
-      "target": [
-        "portable",
-        "nsis"
-      ],
-      "icon": "resources/icon.ico"
-    },
-    "portable": {
-      "artifactName": "Piku-Down-${version}-${arch}.exe"
-    },
-    "nsis": {
-      "deleteAppDataOnUninstall": true,
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "artifactName": "Piku-Down-Setup-${version}-${arch}.exe",
-      "installerIcon": "resources/icon.ico",
-      "uninstallerIcon": "resources/icon.ico",
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Piku Down",
-      "include": "build/installer.nsh"
-    },
-    "electronVersion": "42.11.16",
-    "afterPack": "./scripts/after-pack.cjs",
-    "electronLanguages": [
-      "zh-CN",
-      "en-US"
-    ]
+    "@tauri-apps/cli": "^2.0.0"
   }
 }

@@ -35,7 +35,7 @@ async function parseVideo(){if(busy)return;const generation=++parseGeneration;fo
 function resetParseHome(){if(busy)return;parseGeneration++;formatGeneration++;video=undefined;resetDownloadState();$('result').hidden=true;$('parseHome').hidden=true;$('url').value='';$('title').textContent='';$('owner').textContent='';$('filename').value='';$('page').replaceChildren();$('quality').replaceChildren();$('videoCover').onload=null;$('videoCover').onerror=null;$('videoCover').removeAttribute('src');$('videoCover').hidden=true;$('coverFallback').hidden=false;$('result').dataset.audioAvailable='false';$('downloadKind').value='video';$('audioOutput').value='m4a';$('audioOutputLabel').hidden=true;$('qualityLabel').hidden=false;$('download').disabled=true;$('parse').disabled=false;status('准备就绪');switchView('parse');$('url').focus({preventScroll:true});}
 $('parseHome').onclick=resetParseHome;
 $('parse').onclick=()=>run(parseVideo);
-$('page').onchange=()=>run(formats);$('folder').onclick=()=>run(async()=>{const f=await bili.folder();if(f){folder=f;settings.downloadDir=f;$('folderName').textContent=f;}});
+$('page').onchange=()=>run(formats);$('folder').onclick=()=>run(async()=>{const f=await bili.folder();if(f){folder=f;settings.downloadDir=f;$('folderName').textContent=f;if($('batchFolderName'))$('batchFolderName').textContent=f;}});
 $('download').onclick=()=>run(async()=>{
  if(busy||!video||$('parse').disabled)return;
  resetDownloadState();const generation=downloadGeneration;

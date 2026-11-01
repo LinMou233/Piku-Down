@@ -3,3 +3,9 @@ dist/
 .build-cache/
 work/
 *.log
+
+.tauri-ui/
+src-tauri/target/
+src-tauri/gen/
+
+/target/

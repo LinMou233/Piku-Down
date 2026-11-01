@@ -34,6 +34,14 @@ function renderer(overrides={}){
 }
 function cleared(r){assert.equal(r.$('progress').value,0);assert.equal(r.$('progressText').textContent,'');assert.equal(r.$('reveal').hidden,true);assert.equal(r.evaluate('lastFile'),undefined);}
 
+test('changing the single download directory also updates the batch directory hint',async()=>{
+ const r=renderer();r.bili.folder=async()=> 'C:/new-folder';r.evaluate('settings={}');
+ await r.$('folder').onclick();
+ assert.equal(r.$('folderName').textContent,'C:/new-folder');
+ assert.equal(r.$('batchFolderName').textContent,'C:/new-folder');
+ assert.equal(r.evaluate('folder'),'C:/new-folder');
+});
+
 test('reparse clears completed output immediately, including while parse is pending',async()=>{
  const r=renderer();await r.seed();const next=deferred();r.bili.parse=()=>next.promise;
  const pending=r.parse();cleared(r);assert.equal(r.$('download').disabled,true);assert.equal(r.$('cancel').hidden,true);
