@@ -58,7 +58,7 @@ ARM64主程序、yt-dlp与FFmpeg为ARM64构建；QuickJS暂用官方x86构建，
 
 ## 架构与构建
 
-Rust业务核心位于`crates/piku-core`，不依赖Tauri、wry、WebView2或其他GUI框架。`DesktopHost`只提供窗口、对话框、事件与路径边界；`src-tauri`负责桌面适配，`ui/tauri-bridge.js`衔接原有bili、login与downloadEvents接口。未来更换原生RustGUI时可保留核心、替换适配器，本次不实现第二套GUI。旧Electron后端暂留作对照，不进入默认构建或成品。
+Rust业务核心位于`crates/piku-core`，不依赖Tauri、wry、WebView2或其他GUI框架。`DesktopHost`只提供窗口、对话框、事件与路径边界；`src-tauri`负责桌面适配，`ui/tauri-bridge.js`衔接原有bili、login与downloadEvents接口。未来更换原生RustGUI时可保留核心、替换适配器，本次不实现第二套GUI。旧Electron入口、后端、打包脚本及专属测试已移除，旧实现可查[1.6.3源码](https://github.com/LinMou233/Piku-Down/tree/c8816c7ab7e887adf7c2399c744d681eaa6f2114)。
 
 构建需要Rust的MSVC工具链、Visual Studio C++构建工具、Windows SDK、Node.js与pnpm。Node.js与pnpm只在构建时使用。构建x86／ARM64时需安装对应Rust target与C++工具链支持。
 
@@ -92,7 +92,7 @@ pnpm build:arm64
 | 检查 | 结果与范围 |
 | --- | --- |
 | Rust核心测试 | 50项通过，含任务隔离、取消、文件所有权、缓存、凭证、HTTP故障注入与重复关闭等待 |
-| JavaScript回归 | 181项通过、2项跳过，共183项，无失败 |
+| 前端JavaScript回归 | 34项通过，无失败或跳过，覆盖批次界面、单视频状态、导航、动画、访客提示与Tauri桥接 |
 | 真实FAT32原生文件测试 | 9项通过，含NTFS↔FAT32、竞争、复制失败／磁盘不足注入、取消与清理 |
 | 格式与Clippy | 通过；Clippy执行all-targets并以-D warnings检查 |
 | 三架构构建 | 6个EXE的版本、主程序PE架构与哈希核对通过，不等同实机运行 |
@@ -100,7 +100,7 @@ pnpm build:arm64
 
 最终x64主程序SHA256为`92BBCD76A534C75DD0246E4D1E223AA95977A1C13E548A16BDE5BA643B8C7A82`。GUI另覆盖无效来源失败隔离、暂停／继续、暂停中从1调至3不自动派发、现有YouTube Cookie下载、保存路径、Explorer选中文件、Media Player实际播放、重启历史与解析阶段关闭清理。
 
-JavaScript跳过项为旧Electron打包清单与未提供旧x86媒体二进制的兼容样本检查。保留的旧后端测试不能替代Rust或GUI验收；磁盘不足使用故障注入，未填满测试磁盘。
+JavaScript现只测试实际使用的前端与Tauri桥接，后端回归由Rust测试负责。迁移期间的旧Electron后端测试已随旧实现移除，不计入当前测试数量；自动测试不能替代GUI验收。磁盘不足使用故障注入，未填满测试磁盘。
 
 传输中取消的GUI实测来自较早1.7.0候选：观察到部分传输后取消，正式文件不存在、任务暂存目录清空。最终成品尚未独立重复全部取消时序，不能将旧候选或旧Electron结论写成最终成品GUI通过。重复关闭等待清理有确定性自动测试；一次GUI关闭时下载先完成，重启后文件与历史保留，未记为取消成功。
 
@@ -124,6 +124,7 @@ JavaScript跳过项为旧Electron打包清单与未提供旧x86媒体二进制�
 <details>
 <summary>1.6.3说明与历史记录（不代表1.7.0验证结果）</summary>
 
+以下为1.6.3原文，其中的JavaScript后端文件与Electron构建命令仅适用于旧版源码。
 
 Windows 视频与音频下载工具，支持 B站、X（Twitter）和 YouTube。提供 x64、x86（ia32）、ARM64 构建及实验性的 Win7 兼容构建。
 

@@ -13,10 +13,10 @@ function bridge({arch='x64',ready=Promise.resolve(),invoke=async()=>true}={}){
   vm.runInNewContext(fs.readFileSync(require.resolve('../ui/tauri-bridge.js'),'utf8'),{window,document});
   return {window,calls,listeners};
 }
-test('Tauri桥接保留现有IPC方法和taskId事件载荷',async()=>{
+test('Tauri桥接保留界面调用方法和taskId事件载荷',async()=>{
   const f=bridge();
-  const names=fs.readFileSync(require.resolve('../preload.js'),'utf8').match(/const names=(\[[^;]+\]);/)[1];
-  for(const name of vm.runInNewContext(names))assert.equal(typeof f.window.bili[name],'function',name);
+  const names=['account','logout','folder','parse','formats','download','cancel','cancelAndDelete','reveal','settings','saveSettings','wallpaper','importWallpaper','history','clearHistory','library','windowAction','windowState','authState','openLogin','externalState','externalInstall','externalImport','externalRemember','externalClear','newTaskId','batchAdd','batchState','batchStart','batchPause','batchResume','batchConcurrency','batchCancelAll','batchClear'];
+  for(const name of names)assert.equal(typeof f.window.bili[name],'function',name);
   await f.window.bili.cancelAndDelete('task-a');
   assert.equal(JSON.stringify(f.calls[0]),JSON.stringify(['dispatch',{command:'cancelAndDelete',args:['task-a']}]));
   let event;f.window.downloadEvents.onState(value=>{event=value;});
