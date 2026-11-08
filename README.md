@@ -1,6 +1,6 @@
 # Piku Down 1.7.1
 
-Windows视频与音频下载工具，支持B站、X（Twitter）与YouTube。1.7.0将主程序迁移至Tauri2＋Rust，保留原有单视频与批次下载界面。
+Windows视频与音频下载工具，支持B站、X（Twitter）与YouTube。1.7.0将主程序迁移至Tauri2+Rust，保留原有单视频与批次下载界面。
 
 ## 本次更新
 
