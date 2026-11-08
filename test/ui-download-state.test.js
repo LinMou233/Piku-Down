@@ -63,6 +63,17 @@ test('a completed download with a cleanup warning keeps the saved file and shows
  assert.equal(r.$('progress').value,100);assert.equal(r.$('progressText').textContent,'已保存：C:/test/warn.mp4');assert.equal(r.$('reveal').hidden,false);
  assert.match(r.$('status').textContent,/^下载完成 · 清理警告：正式文件已保存.*busy$/);
 });
+test('unknown total (fragmented downloads) still shows downloaded amount, then switches to a ratio',async()=>{
+ const r=renderer();await r.evaluate('parseVideo()');const next=deferred();r.bili.download=()=>next.promise;
+ let cleared=false;r.$('progress').removeAttribute=name=>{if(name==='value')cleared=true;};
+ const pending=r.download();
+ r.progress({label:'正在下载',received:52428800,total:0});
+ assert.equal(r.$('progressText').textContent,'正在下载 · 已下载50.0 MB');assert.equal(cleared,true);
+ r.progress({label:'正在下载',received:52428800,total:104857600});
+ assert.equal(r.$('progress').value,50);assert.equal(r.$('progressText').textContent,'正在下载 · 50.0 / 100.0 MB');
+ next.resolve({file:'C:/test/hdr.mp4',video:{width:3840,height:2160,fps:60,codec:'hevc'}});await pending;
+ assert.match(r.$('status').textContent,/HEVC（若无法播放/);assert.equal(r.$('progress').value,100);
+});
 test('progress after completion or during a new parse cannot overwrite UI state',async()=>{
  const r=renderer();await r.seed();const saved=r.$('progressText').textContent;
  r.progress({label:'late',received:1,total:2});assert.equal(r.$('progressText').textContent,saved);assert.equal(r.$('progress').value,100);

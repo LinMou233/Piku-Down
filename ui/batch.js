@@ -36,7 +36,8 @@
       nodes.title.textContent=task.title;nodes.meta.textContent=({bilibili:'B站',x:'X',youtube:'YouTube'}[task.platform]||'视频')+' · '+labels[task.state];
       nodes.cancel.setAttribute('aria-label','取消任务：'+task.title);nodes.reveal.setAttribute('aria-label','打开位置：'+task.title);
       nodes.progress.value=task.progress||0;
-      nodes.detail.textContent=task.label+' · '+(task.progress||0).toFixed(1)+'% · '+speed;
+      const amount=task.total?(task.progress||0).toFixed(1)+'%':task.received?'已下载'+(task.received/1048576).toFixed(1)+' MB':'0.0%';
+      nodes.detail.textContent=task.label+' · '+amount+' · '+speed;
       nodes.output.textContent=task.file?'已保存：'+task.file:'';
       nodes.reveal.hidden=task.state!=='completed';nodes.cancel.hidden=ended.has(task.state);
       nodes.cancel.disabled=ended.has(task.state)||task.label==='正在取消并清理';

@@ -107,9 +107,69 @@ pub async fn run(
 ) -> Result<Vec<u8>, String> {
     let output = run_inner(exe, args, cancel, timeout, progress).await?;
     if !output.success {
-        return Err("解析或下载失败，请确认网页能访问该视频及账号权限".into());
+        let base = "解析或下载失败，请确认网页能访问该视频及账号权限";
+        return Err(match failure_detail(&output.stderr) {
+            Some(detail) => format!("{base}（{detail}）"),
+            None => base.into(),
+        });
     }
     Ok(output.stdout)
+}
+/// yt-dlp的数值可能是整数或浮点数（分段下载的total_bytes_estimate是浮点）。
+fn byte_count(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n.round() as u64)
+    })
+}
+/// 解析yt-dlp一行输出：PIKU_PROGRESS进度JSON，或合并／转封装等后处理提示。
+fn progress_line(line: &[u8]) -> Option<(&'static str, u64, u64)> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if let Some(data) = line.strip_prefix(b"PIKU_PROGRESS:") {
+        let value = serde_json::from_slice::<serde_json::Value>(data).ok()?;
+        let received = byte_count(&value["downloaded_bytes"]).unwrap_or(0);
+        let total = byte_count(&value["total_bytes"])
+            .filter(|n| *n > 0)
+            .or_else(|| byte_count(&value["total_bytes_estimate"]))
+            .unwrap_or(0)
+            .max(if value["status"] == "finished" {
+                received
+            } else {
+                0
+            });
+        // 视频与音轨分别下载，单个文件完成不代表进入合并。
+        return Some(("正在下载", received, total));
+    }
+    const POSTPROCESS: [&[u8]; 6] = [
+        b"[Merger]",
+        b"[VideoRemuxer]",
+        b"[VideoConvertor]",
+        b"[ExtractAudio]",
+        b"[FixupM3u8]",
+        b"[FixupM4a]",
+    ];
+    POSTPROCESS
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        .then_some(("正在处理音视频", 0, 0))
+}
+/// 从组件stderr中取出最能说明原因的一行，便于界面与日志排查。
+pub fn failure_detail(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("ERROR:") || line.contains("Error") || line.contains("error"))
+        .or_else(|| lines.last())?;
+    let line: String = line.chars().filter(|c| !c.is_control()).take(240).collect();
+    Some(line)
 }
 struct Output {
     stdout: Vec<u8>,
@@ -162,20 +222,8 @@ async fn run_inner(
             if let Some(callback) = &progress {
                 for byte in &buffer[..n] {
                     if *byte == b'\n' {
-                        if let Some(data) = line.strip_prefix(b"PIKU_PROGRESS:") {
-                            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) {
-                                let received = value["downloaded_bytes"].as_u64().unwrap_or(0);
-                                let total = value["total_bytes"]
-                                    .as_u64()
-                                    .or_else(|| value["total_bytes_estimate"].as_u64())
-                                    .unwrap_or(0);
-                                let label = if value["status"] == "finished" {
-                                    "正在处理音视频"
-                                } else {
-                                    "正在下载"
-                                };
-                                callback(label.into(), received, total);
-                            }
+                        if let Some((label, received, total)) = progress_line(&line) {
+                            callback(label.into(), received, total);
                         }
                         line.clear();
                     } else if line.len() < 64 * 1024 {
@@ -271,8 +319,13 @@ fn probe_text(input: &str) -> serde_json::Value {
         .captures(line)
         .and_then(|c| c[1].parse::<f64>().ok())
         .unwrap_or(0.0);
+    let codec = regex::Regex::new(r"Video: ([A-Za-z0-9_]+)")
+        .unwrap()
+        .captures(line)
+        .map(|c| c[1].to_ascii_lowercase())
+        .unwrap_or_default();
     if let Some(size) = size {
-        serde_json::json!({"width":size[1].parse::<u32>().unwrap_or(0),"height":size[2].parse::<u32>().unwrap_or(0),"fps":fps})
+        serde_json::json!({"width":size[1].parse::<u32>().unwrap_or(0),"height":size[2].parse::<u32>().unwrap_or(0),"fps":fps,"codec":codec})
     } else {
         serde_json::Value::Null
     }
@@ -280,10 +333,58 @@ fn probe_text(input: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fragmented_download_progress_uses_float_estimate() {
+        // HLS／DASH分段下载：没有total_bytes，估算值为浮点数。
+        let line = br#"PIKU_PROGRESS:{"status":"downloading","downloaded_bytes":52428800,"total_bytes":null,"total_bytes_estimate":1834567890.5,"fragment_index":12,"fragment_count":420}"#;
+        assert_eq!(
+            super::progress_line(line),
+            Some(("正在下载", 52428800, 1834567891))
+        );
+        let plain =
+            br#"PIKU_PROGRESS:{"status":"downloading","downloaded_bytes":10,"total_bytes":100}"#;
+        assert_eq!(super::progress_line(plain), Some(("正在下载", 10, 100)));
+        let unknown = b"PIKU_PROGRESS:{\"status\":\"downloading\",\"downloaded_bytes\":2048.0}\r";
+        assert_eq!(super::progress_line(unknown), Some(("正在下载", 2048, 0)));
+        let finished =
+            br#"PIKU_PROGRESS:{"status":"finished","downloaded_bytes":300,"total_bytes":null}"#;
+        assert_eq!(super::progress_line(finished), Some(("正在下载", 300, 300)));
+    }
+    #[test]
+    fn postprocessing_lines_switch_to_processing_label() {
+        assert_eq!(
+            super::progress_line(b"[Merger] Merging formats into \"media.mp4\""),
+            Some(("正在处理音视频", 0, 0))
+        );
+        assert_eq!(
+            super::progress_line(b"[download] Destination: media.f625.mp4"),
+            None
+        );
+        assert_eq!(super::progress_line(b"PIKU_PROGRESS:not json"), None);
+    }
+    #[test]
+    fn failure_detail_prefers_component_error_line() {
+        let stderr = b"[youtube] abc: Downloading webpage\nWARNING: slow\nERROR: [youtube] abc: Sign in to confirm you are not a bot\n";
+        assert_eq!(
+            super::failure_detail(stderr).unwrap(),
+            "ERROR: [youtube] abc: Sign in to confirm you are not a bot"
+        );
+        assert_eq!(super::failure_detail(b"  \n").as_deref(), None);
+        assert_eq!(
+            super::failure_detail(&[b'x'; 600]).unwrap().chars().count(),
+            240
+        );
+    }
+    #[test]
     fn reads_only_video_metadata() {
         assert_eq!(
             super::probe_text("Stream #0: Video: h264, yuv420p, 1920x1080, 59.94 fps")["height"],
             1080
+        );
+        assert_eq!(
+            super::probe_text(
+                "Stream #0:0: Video: hevc (Main) (hvc1 / 0x31637668), 3840x2160, 60 fps"
+            )["codec"],
+            "hevc"
         );
         assert!(super::probe_text("Audio: aac").is_null());
     }

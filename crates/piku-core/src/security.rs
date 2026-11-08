@@ -1,4 +1,6 @@
-use std::{ffi::c_void, io, ptr};
+use std::io;
+#[cfg(windows)]
+use std::{ffi::c_void, ptr};
 
 #[cfg(windows)]
 #[repr(C)]

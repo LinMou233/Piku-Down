@@ -4,6 +4,7 @@ const status=t=>$('status').textContent=t;
 async function run(fn){try{await fn();}catch(e){status(e.message.replace(/^Error invoking remote method '[^']+': Error: /,''));}}
 async function account(profile){const a=profile||await bili.account();if(accountId!==undefined&&accountId!==a.mid)resetLibrary();accountId=a.mid;$('login').textContent=a.logged?'退出登录':'扫码登录';$('login').dataset.logged=!!a.logged;$('biliAccountState').textContent=a.logged?'已登录 · '+a.name:'未登录';$('biliSettingsLogin').textContent=a.logged?'退出登录':'扫码登录';$('accountName').textContent=a.logged?a.name:'未登录';$('accountName').classList.toggle('vip',!!a.vip);$('accountType').textContent=a.logged?(a.vip?a.vipLabel:'普通会员'):'登录后查看账户信息';$('accountDetails').hidden=!a.logged;$('accountUid').textContent='UID · '+(a.mid||'');$('accountLevel').textContent='等级 · Lv.'+(a.level??0);$('accountExpiry').textContent=a.vip&&a.vipDue?'会员有效期 · '+new Date(a.vipDue).toLocaleDateString('zh-CN'):'';$('accountMessage').textContent=a.error?'账户暂未连接，可稍后重试或重新扫码。':'';const face=typeof a.face==='string'?a.face.replace(/^http:/,'https:'):'';if(a.logged&&/^https:\/\/[^/]+\.hdslb\.com\//i.test(face)){$('avatarImage').src=face;$('avatarImage').hidden=false;$('avatarFallback').hidden=true;}else{$('avatarImage').hidden=true;$('avatarImage').removeAttribute('src');$('avatarFallback').hidden=false;}setAuthState(a);notifyStartupAccount(a);}
 $('login').onclick=()=>run(async()=>{if($('login').dataset.logged==='true'){await bili.logout();await account();status('已退出登录');}else await bili.openLogin();});
+function codecNote(info){const codec=String(info?.codec||'').toLowerCase();if(!codec)return '';const name=codec==='hevc'?'HEVC':codec==='av1'?'AV1':codec.toUpperCase();return ' · '+name+((codec==='hevc'||codec==='av1')?'（若无法播放，请安装对应视频扩展或换用其他播放器）':'');}
 let formatGeneration=0;
 async function formats(){
  if(busy||!video)return;
@@ -50,7 +51,7 @@ $('download').onclick=()=>run(async()=>{
   const completed=await bili.download({taskId:singleTaskId,folder,bvid:video.bvid,cid:video.pages[Number($('page').value)].cid,qn:video.platform?$('quality').value:Number($('quality').value),kind:$('downloadKind').value,audioFormat:$('audioOutput').value,title:$('filename').value});
   if(generation!==downloadGeneration)return;
   activeDownload=0;lastFile=completed.file;
-  status((completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成')+(completed.warning?' · 清理警告：'+completed.warning:''));
+  status((completed.video?.fps?'下载完成 · '+completed.video.width+'×'+completed.video.height+' · 检测帧率 '+completed.video.fps+'fps':'下载完成')+codecNote(completed.video)+(completed.warning?' · 清理警告：'+completed.warning:''));
   $('progress').value=100;$('progressText').textContent='已保存：'+lastFile;$('reveal').hidden=false;$('reveal').disabled=false;
   if(!$('view-history').hidden)await loadHistory();
  }catch(error){if(generation===downloadGeneration)throw error;}
@@ -67,7 +68,10 @@ bili.onProgress(d=>{
  if(d.source==='batch'||(singleTaskId&&d.taskId!==singleTaskId))return;
  if(!busy||activeDownload!==downloadGeneration)return;
  if($('result').hidden)status(d.label);
- $('progress').value=d.total?d.received/d.total*100:0;$('progressText').textContent=d.label+(d.total?` · ${(d.received/1048576).toFixed(1)} / ${(d.total/1048576).toFixed(1)} MB`:'');
+ // 总大小未知（如分段下载估算前）时显示已下载量与不确定进度条，不让界面看似卡住。
+ const mb=n=>(n/1048576).toFixed(1);
+ if(d.total)$('progress').value=Math.min(100,d.received/d.total*100);else if(d.received)$('progress').removeAttribute('value');else $('progress').value=0;
+ $('progressText').textContent=d.label+(d.total?` · ${mb(d.received)} / ${mb(d.total)} MB`:d.received?` · 已下载${mb(d.received)} MB`:'');
 });
 
 

@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "piku-core"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "piku-down"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "piku-core",
  "serde_json",

@@ -2,9 +2,10 @@ use crate::process::Progress;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{io::AsyncWriteExt, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,8 @@ pub struct Runtime {
     client: reqwest::Client,
     gate: Mutex<()>,
     assets: Vec<Asset>,
+    /// 已校验组件的大小与修改时间；未变化时不再重复计算上百MB的SHA256。
+    verified: parking_lot::Mutex<HashMap<&'static str, (u64, SystemTime)>>,
 }
 fn asset(
     name: &'static str,
@@ -113,7 +116,7 @@ impl Runtime {
         if cfg!(target_arch = "x86") {
             assets.push(asset("ffmpeg.exe","https://github.com/eugeneware/ffmpeg-static/releases/download/b4.4.1/win32-ia32.gz".into(),"6cbc74f5f1f4136bdbe2e6bb92e823ffb06ed786fdcbe899113789fd4c506403","f8547659a857a58fc43fb06a5a315d85b609f3e9d900d2bf083edff2072c7fa2","gz",40*1024*1024));
         } else if cfg!(target_arch = "aarch64") {
-            assets.push(asset("ffmpeg.exe","https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-01-12-49/ffmpeg-N-128273-g836436cfb9-winarm64-gpl.zip".into(),"2a8b73ee16fd7291dbb79575737b0f1bdd69ca0c9cc698463de9762eaa4adcc3",include_str!("../arm64-ffmpeg.sha256").trim(),"zip",180*1024*1024));
+            assets.push(asset("ffmpeg.exe","https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-winarm64-gpl-9.0.zip".into(),"6dcd0626f9f6d6c7323565e57410e9f37ed14a85946ec9ea9caff294ca32f5c0",include_str!("../arm64-ffmpeg.sha256").trim(),"zip",180*1024*1024));
         } else {
             assets.push(asset("ffmpeg.exe","https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz".into(),"8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77","04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00","gz",40*1024*1024));
         }
@@ -124,7 +127,34 @@ impl Runtime {
             client,
             gate: Mutex::new(()),
             assets,
+            verified: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+    async fn verified(&self, asset: &Asset) -> bool {
+        let path = self.path(asset.name);
+        let stamp = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| Some((m.len(), m.modified().ok()?)));
+        let Some(stamp) = stamp else {
+            self.verified.lock().remove(asset.name);
+            return false;
+        };
+        if self.verified.lock().get(asset.name) == Some(&stamp) {
+            return true;
+        }
+        let hash = asset.raw;
+        let ok = tokio::task::spawn_blocking(move || digest(&path).is_ok_and(|d| d == hash))
+            .await
+            .unwrap_or(false);
+        let mut cache = self.verified.lock();
+        if ok {
+            cache.insert(asset.name, stamp);
+        } else {
+            cache.remove(asset.name);
+        }
+        ok
     }
     pub fn path(&self, key: &str) -> PathBuf {
         self.root.join(key)
@@ -132,11 +162,7 @@ impl Runtime {
     pub async fn status(&self) -> serde_json::Value {
         let mut installed = true;
         for a in &self.assets {
-            let p = self.path(a.name);
-            let hash = a.raw;
-            installed &= tokio::task::spawn_blocking(move || digest(&p).is_ok_and(|d| d == hash))
-                .await
-                .unwrap_or(false);
+            installed &= self.verified(a).await;
         }
         serde_json::json!({"supported":true,"installed":installed,"version":VERSION,"reason":"","architecture":std::env::consts::ARCH})
     }
@@ -154,12 +180,7 @@ impl Runtime {
             .ok_or("未知下载组件")?
             .clone();
         let target = self.path(key);
-        let check = target.clone();
-        let hash = a.raw;
-        if tokio::task::spawn_blocking(move || digest(&check).is_ok_and(|d| d == hash))
-            .await
-            .unwrap_or(false)
-        {
+        if self.verified(&a).await {
             return Ok(target);
         }
         tokio::fs::create_dir_all(&self.root)
@@ -306,6 +327,24 @@ mod tests {
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
+    #[tokio::test]
+    async fn verified_components_are_rechecked_when_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(dir.path(), client());
+        runtime.root = dir.path().to_owned();
+        let hash: &'static str = Box::leak(digest_bytes(b"complete").into_boxed_str());
+        let asset = asset("tool.exe", String::new(), hash, hash, "exe", 1);
+        assert!(!runtime.verified(&asset).await);
+        std::fs::write(dir.path().join("tool.exe"), b"complete").unwrap();
+        assert!(runtime.verified(&asset).await);
+        assert!(runtime.verified.lock().contains_key("tool.exe"));
+        std::fs::write(dir.path().join("tool.exe"), b"tampered!").unwrap();
+        assert!(!runtime.verified(&asset).await);
+        assert!(!runtime.verified.lock().contains_key("tool.exe"));
+    }
+    fn digest_bytes(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
     #[tokio::test]
     async fn component_response_timeout_covers_connected_server_without_headers() {
         let (url, received, server) = server(false).await;
