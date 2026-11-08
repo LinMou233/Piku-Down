@@ -43,8 +43,10 @@ impl MotionState {
                 state.pending = false;
                 (std::mem::take(&mut state.dx), std::mem::take(&mut state.dy))
             };
-            if let Some(window) = app.get_webview_window(&label) {
-                let _ = window.emit(
+            // Tauri2的emit会广播到所有窗口，这里只发给移动的窗口本身。
+            if app.get_webview_window(&label).is_some() {
+                let _ = app.emit_to(
+                    tauri::EventTarget::webview_window(label.as_str()),
                     "windowMotion",
                     serde_json::json!({"dx":delta.0,"dy":delta.1}),
                 );

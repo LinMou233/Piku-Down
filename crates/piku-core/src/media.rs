@@ -488,6 +488,9 @@ impl Backend {
         args.extend(strings(&[
             "--no-simulate",
             "--no-overwrites",
+            // 4K／HDR常为HLS或DASH分段，默认逐段下载很慢。
+            "--concurrent-fragments",
+            "4",
             "--newline",
             "--progress",
             "--progress-template",
@@ -499,14 +502,21 @@ impl Backend {
             "--".into(),
             record.source.url,
         ]);
-        process::run(
+        if let Err(error) = process::run(
             &exe,
             &args,
             &task.cancel,
             Duration::from_secs(24 * 3600),
             Some(progress),
         )
-        .await?;
+        .await
+        {
+            cancelled(&task.cancel)?;
+            if output::file_size_limit(temp).is_some() {
+                return Err(format!("{error}；{}", output::FAT32_LIMIT_MESSAGE));
+            }
+            return Err(error);
+        }
         cancelled(&task.cancel)?;
         Ok(temp.join(format!("media.{extension}")))
     }
@@ -626,11 +636,19 @@ impl Backend {
             };
             let (video_result, audio_result) = tokio::join!(video_transfer, audio_transfer);
             stream_results(video_result, audio_result)?;
+            let merged = file_len(&video_path).await + file_len(&audio_path).await;
+            if output::file_size_limit(temp).is_some_and(|limit| merged > limit) {
+                return Err(output::FAT32_LIMIT_MESSAGE.into());
+            }
             args.extend(["-i".into(), path_string(&video_path)]);
             if sound.is_some() {
                 args.extend(["-i".into(), path_string(&audio_path)]);
             }
             args.extend(strings(&["-c", "copy"]));
+            // HEVC以hvc1标记写入MP4，系统播放器与QuickTime类播放器识别更好。
+            if number(&video["codecid"]) == 12 {
+                args.extend(strings(&["-tag:v", "hvc1"]));
+            }
         } else {
             let segments = data["durl"]
                 .as_array()
@@ -650,6 +668,13 @@ impl Backend {
                 )
                 .await?;
                 list.push_str(&format!("file 'seg{index}'\n"));
+            }
+            let mut merged = 0;
+            for index in 0..segments.len() {
+                merged += file_len(&temp.join(format!("seg{index}"))).await;
+            }
+            if output::file_size_limit(temp).is_some_and(|limit| merged > limit) {
+                return Err(output::FAT32_LIMIT_MESSAGE.into());
             }
             tokio::fs::write(temp.join("list.txt"), list)
                 .await
@@ -704,6 +729,12 @@ async fn transfer(
     )
     .await
 }
+async fn file_len(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
 fn stream_results(video: Result<(), String>, audio: Result<(), String>) -> Result<(), String> {
     match (video, audio) {
         (Err(video), Err(audio)) if video == "下载已取消" && audio != "下载已取消" => {
@@ -748,6 +779,8 @@ async fn transfer_with_stall(
             let response=tokio::select!{r=tokio::time::timeout(stall,client.get(url).header("Referer","https://www.bilibili.com/").send())=>r.map_err(|_|"媒体源无响应")?.map_err(|_|"媒体源连接失败")?,_=cancel.cancelled()=>return Err("下载已取消".to_owned())};
             if !response.status().is_success(){return Err(format!("媒体源返回{}",response.status().as_u16()));}
             let total=response.content_length().unwrap_or(0);let mut received=0;
+            let limit=file.parent().and_then(output::file_size_limit);
+            if limit.is_some_and(|limit|total>limit){return Err(output::FAT32_LIMIT_MESSAGE.into());}
             let mut stream=response.bytes_stream();let output=tokio::fs::File::create(file).await.map_err(|_|"无法创建媒体暂存文件")?;
             let mut writer=BufWriter::with_capacity(1024*1024,output);
             loop{
@@ -755,7 +788,9 @@ async fn transfer_with_stall(
                 let Some(chunk)=chunk else{break;};let chunk=chunk.map_err(|_|"媒体源传输中断")?;
                 writer.write_all(&chunk).await.map_err(|_|"媒体保存失败，请检查磁盘空间与文件大小限制")?;
                 cancelled(cancel)?;
-                received+=chunk.len()as u64;progress("正在下载".into(),received,total);
+                received+=chunk.len()as u64;
+                if limit.is_some_and(|limit|received>limit){return Err(output::FAT32_LIMIT_MESSAGE.into());}
+                progress("正在下载".into(),received,total);
             }
             writer.flush().await.map_err(|_|"媒体保存失败，请检查磁盘空间")?;
             if received==0||total>0&&received!=total{return Err("媒体源返回不完整文件".into());}

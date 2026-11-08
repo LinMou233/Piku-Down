@@ -22,189 +22,34 @@ pub fn now() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::host::{HeadlessHost, HostFuture};
-    #[derive(Default)]
-    struct ClosingHost {
-        login_closed: AtomicBool,
-    }
-    impl DesktopHost for ClosingHost {
-        fn emit(&self, _: &str, _: Value) {}
-        fn video_dir(&self) -> Option<PathBuf> {
-            None
-        }
-        fn pick_path(
-            &self,
-            directory: bool,
-            title: &str,
-            extensions: &[&str],
-        ) -> HostFuture<Result<Option<PathBuf>, String>> {
-            HeadlessHost.pick_path(directory, title, extensions)
-        }
-        fn open_login(&self) -> Result<(), String> {
-            HeadlessHost.open_login()
-        }
-        fn close_login(&self) -> Result<(), String> {
-            self.login_closed.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        fn window_state(&self, role: WindowRole) -> Result<Value, String> {
-            HeadlessHost.window_state(role)
-        }
-        fn window_action(&self, role: WindowRole, action: &str) -> Result<Value, String> {
-            HeadlessHost.window_action(role, action)
-        }
-    }
-    fn backend() -> (tempfile::TempDir, Arc<Backend>) {
-        let dir = tempfile::tempdir().unwrap();
-        let backend =
-            Arc::new(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).unwrap());
-        (dir, backend)
-    }
-    #[test]
-    fn profile_lock_protects_another_instances_temporary_files() {
-        let (dir, backend) = backend();
-        let file = dir.path().join("private-temp/owned.txt");
-        std::fs::write(&file, b"test").unwrap();
-        assert!(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).is_err());
-        assert!(file.exists());
-        drop(backend);
-        assert!(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).is_ok());
-        assert!(!file.exists());
-    }
-    #[tokio::test]
-    async fn cancelled_cache_hits_fail_without_network() {
-        let (_dir, backend) = backend();
-        backend.play_cache.lock().insert(
-            "BV17x411w7KC:1:80".into(),
-            (Instant::now(), json!({"quality":80})),
-        );
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        assert!(backend
-            .play("BV17x411w7KC", &json!(1), 80, &cancel)
-            .await
-            .is_err());
-    }
-    #[test]
-    fn auth_changes_clear_cache_and_advance_epoch() {
-        let (_dir, backend) = backend();
-        backend
-            .play_cache
-            .lock()
-            .insert("old".into(), (Instant::now(), json!({})));
-        let before = backend.auth_epoch.load(Ordering::SeqCst);
-        backend.invalidate_play();
-        assert!(backend.play_cache.lock().is_empty());
-        assert!(backend.auth_epoch.load(Ordering::SeqCst) > before);
-    }
-    #[tokio::test]
-    async fn concurrent_close_requests_wait_for_the_same_cleanup() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = Arc::new(ClosingHost::default());
-        let backend = Arc::new(Backend::new(dir.path().to_owned(), host.clone()).unwrap());
-        let added = backend
-            .add_batch("BV17x411w7KC", json!({"folder":dir.path()}))
-            .unwrap();
-        let id = added["added"][0].as_str().unwrap();
-        {
-            let mut queue = backend.queue.lock();
-            let job = queue.jobs.get_mut(id).unwrap();
-            job.started = true;
-            job.finishing = true;
-            job.view.state = "merging".into();
-        }
-        let first = backend.shutdown();
-        tokio::pin!(first);
-        assert!(tokio::time::timeout(Duration::from_millis(10), &mut first)
-            .await
-            .is_err());
-        let second = backend.shutdown();
-        tokio::pin!(second);
-        assert!(tokio::time::timeout(Duration::from_millis(10), &mut second)
-            .await
-            .is_err());
-        assert!(!host.login_closed.load(Ordering::SeqCst));
-        {
-            let mut queue = backend.queue.lock();
-            let job = queue.jobs.get_mut(id).unwrap();
-            job.view.state = "completed".into();
-            job.done.send_replace(Some(Ok(json!({"file":"saved"}))));
-        }
-        first.await;
-        second.await;
-        assert!(backend.queue.lock().closing);
-        assert!(host.login_closed.load(Ordering::SeqCst));
-    }
-    #[test]
-    fn dash_cache_reuses_each_available_quality_and_keeps_pages_separate() {
-        let (_dir, b) = backend();
-        let data = json!({"dash":{"video":[{"id":80},{"id":112}]}});
-        b.cache_play("BV1", &json!(1), 127, data.clone(), 0)
-            .unwrap();
-        for qn in [80, 112, 127] {
-            assert_eq!(b.cached_play(&format!("BV1:1:{qn}")), Some(data.clone()));
-        }
-        assert!(b.cached_play("BV1:2:80").is_none());
-        assert!(b.cached_play("BV2:1:80").is_none());
-    }
-    #[test]
-    fn old_auth_results_and_expired_entries_cannot_populate_cache() {
-        let (_dir, b) = backend();
-        b.invalidate_play();
-        assert!(b.cache_play("BV1", &json!(1), 127, json!({}), 0).is_err());
-        assert!(b.play_cache.lock().is_empty());
-        b.play_cache.lock().insert(
-            "expired".into(),
-            (Instant::now() - Duration::from_secs(61), json!({})),
-        );
-        assert!(b.cached_play("expired").is_none());
-        assert!(b.play_cache.lock().is_empty());
-    }
-    #[test]
-    fn cache_is_bounded_and_non_dash_responses_do_not_alias_other_qualities() {
-        let (_dir, b) = backend();
-        b.cache_play("BV1", &json!(1), 80, json!({"accept_quality":[80,112]}), 0)
-            .unwrap();
-        assert!(b.cached_play("BV1:1:112").is_none());
-        for cid in 2..90 {
-            b.cache_play("BV1", &json!(cid), 80, json!({}), 0).unwrap();
-        }
-        assert_eq!(b.play_cache.lock().len(), 64);
-    }
-    #[test]
-    fn public_mode_does_not_read_saved_credentials() {
-        let (dir, backend) = backend();
-        std::fs::write(
-            dir.path().join("external-x.bin"),
-            b"invalid encrypted test data",
-        )
-        .unwrap();
-        assert!(backend.cookie_file("x", "public").unwrap().is_none());
-        assert!(backend.cookies.lock().is_empty());
-    }
-    #[test]
-    fn memory_cookie_and_temporary_cookie_are_removed_separately() {
-        let (dir, backend) = backend();
-        let sample =
-            "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\ttest-only\n";
-        backend.save_cookie("x", sample.into(), false).unwrap();
-        assert!(!dir.path().join("external-x.bin").exists());
-        let file = backend.cookie_file("x", "session").unwrap().unwrap();
-        let path = file.path().to_owned();
-        assert!(path.exists());
-        drop(file);
-        assert!(!path.exists());
-        assert!(backend.cookie("x").unwrap().is_some());
-    }
-    #[test]
-    fn remember_removal_failures_are_reported() {
-        let (dir, backend) = backend();
-        std::fs::create_dir(dir.path().join("external-x.bin")).unwrap();
-        assert!(backend.save_cookie("x", "test".into(), false).is_err());
-    }
+fn color_or(value: &Value, fallback: &str) -> String {
+    value
+        .as_str()
+        .filter(|s| {
+            s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .unwrap_or(fallback)
+        .to_ascii_lowercase()
+}
+/// 只保留已知设置项并校正类型与范围，旧版迁移或界面传入的异常值不会写回磁盘。
+pub fn sanitize_settings(settings: &mut Value, default_dir: &Path) {
+    let source = settings.clone();
+    let download_dir = source["downloadDir"]
+        .as_str()
+        .filter(|s| Path::new(s).is_absolute())
+        .map(|s| json!(s))
+        .unwrap_or_else(|| json!(default_dir));
+    *settings = json!({
+        "dragEffects": true,
+        "performance": source["performance"].as_bool().unwrap_or(false),
+        "mode": if source["mode"] == "wallpaper" { "wallpaper" } else { "color" },
+        "color": color_or(&source["color"], "#e7ebf2"),
+        "darkColor": color_or(&source["darkColor"], "#171a24"),
+        "blur": source["blur"].as_f64().filter(|n| n.is_finite()).unwrap_or(12.0).clamp(0.0, 40.0),
+        "collapsed": source["collapsed"].as_bool().unwrap_or(false),
+        "theme": if source["theme"] == "dark" { "dark" } else { "light" },
+        "downloadDir": download_dir,
+    });
 }
 pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
@@ -275,7 +120,7 @@ impl Backend {
             }
         }
         let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 Piku-Down/1.7.0")
+            .user_agent("Mozilla/5.0 Piku-Down/1.7.1")
             .connect_timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()?;
@@ -382,6 +227,34 @@ impl Backend {
         items.retain(|x| x["taskId"] != id);
         let _ = self.write_unlocked("history", &json!(items));
     }
+    /// 启动时清理异常退出遗留的任务暂存目录（下载目录与最近历史所在目录，超过24小时未修改）。
+    pub fn cleanup_stale_temp(&self) {
+        let mut folders = vec![PathBuf::from(text(&self.settings(), "downloadDir"))];
+        for item in self
+            .read("history", json!([]))
+            .as_array()
+            .map(|items| items.iter().take(100).cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            if let Some(parent) = Path::new(text(&item, "file")).parent() {
+                if parent.is_absolute()
+                    && !folders.iter().any(|f| f == parent)
+                    && folders.len() < 20
+                {
+                    folders.push(parent.to_owned());
+                }
+            }
+        }
+        let removed: usize = folders
+            .iter()
+            .map(|folder| crate::output::cleanup_stale(folder, Duration::from_secs(24 * 3600)))
+            .sum();
+        if removed > 0 {
+            self.log(&format!(
+                "[startup] 已清理{removed}个异常退出遗留的暂存目录"
+            ));
+        }
+    }
     pub fn emit(&self, name: &str, value: Value) {
         self.host.emit(name, value);
     }
@@ -399,15 +272,8 @@ impl Backend {
             .host
             .video_dir()
             .unwrap_or_else(|| self.root.join("downloads"));
-        let mut settings = json!({"dragEffects":true,"performance":false,"mode":"color","color":"#e7ebf2","darkColor":"#171a24","blur":12,"collapsed":false,"theme":"light","downloadDir":default_dir});
-        if let Some(map) = self.read("settings", json!({})).as_object() {
-            for (k, v) in map {
-                settings[k] = v.clone();
-            }
-        }
-        if !Path::new(text(&settings, "downloadDir")).is_absolute() {
-            settings["downloadDir"] = json!(default_dir);
-        }
+        let mut settings = self.read("settings", json!({}));
+        sanitize_settings(&mut settings, &default_dir);
         settings
     }
     pub fn download_folder(&self, value: &Value) -> Result<PathBuf, String> {
@@ -511,7 +377,8 @@ impl Backend {
         }
         let value: Value = tokio::select! {r=result.json()=>r.map_err(|_|"B站返回数据无效")?,_=cancel.cancelled()=>return Err("下载已取消".into())};
         if value["code"].as_i64().unwrap_or(-1) != 0 {
-            if value["code"] == -101 {
+            // 只有原本已登录时，-101才代表登录失效；访客请求不应清空缓存或广播状态。
+            if value["code"] == -101 && self.profile.lock()["logged"] == true {
                 self.invalidate_play();
                 *self.profile.lock() = json!({"logged":false});
                 self.emit("authStateChanged", json!({"logged":false}));
@@ -589,7 +456,29 @@ impl Backend {
         }
         Ok(data)
     }
+    /// 本地Cookie中是否有B站登录凭证；没有时无需请求nav。
+    pub fn has_bili_session(&self) -> bool {
+        self.jar
+            .cookies(&url::Url::parse("https://api.bilibili.com/").unwrap())
+            .and_then(|value| {
+                value.to_str().ok().map(|cookies| {
+                    cookies
+                        .split(';')
+                        .any(|pair| pair.trim().starts_with("SESSDATA="))
+                })
+            })
+            .unwrap_or(false)
+    }
     pub async fn account(&self) -> Value {
+        if !self.has_bili_session() {
+            let value = json!({"logged":false});
+            let previous = std::mem::replace(&mut *self.profile.lock(), value.clone());
+            if previous["logged"] == true {
+                self.invalidate_play();
+            }
+            self.emit("authStateChanged", value.clone());
+            return value;
+        }
         let value = match self
             .api(
                 "https://api.bilibili.com/x/web-interface/nav",
@@ -619,7 +508,36 @@ impl Backend {
     ) -> Result<Option<PathBuf>, String> {
         self.host.pick_path(folder, title, extensions).await
     }
+    /// 追加一行诊断日志（配置目录下的piku.log，超过1MB时轮换一次）。不记录Cookie或请求参数。
+    pub fn log(&self, line: &str) {
+        let path = self.root.join("piku.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+            let _ = std::fs::rename(&path, self.root.join("piku.log.1"));
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let line: String = line.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+            let _ = writeln!(file, "{} {}", now(), line);
+        }
+    }
     pub async fn dispatch(
+        self: Arc<Self>,
+        role: WindowRole,
+        command: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        let result = self.clone().dispatch_inner(role, command, args).await;
+        if let Err(error) = &result {
+            if command != "poll" && error != "下载已取消" {
+                self.log(&format!("[{command}] {error}"));
+            }
+        }
+        result
+    }
+    async fn dispatch_inner(
         self: Arc<Self>,
         role: WindowRole,
         command: &str,
@@ -652,13 +570,11 @@ impl Backend {
                         settings[key] = value[key].clone();
                     }
                 }
-                settings["blur"] =
-                    json!(settings["blur"].as_f64().unwrap_or(12.0).clamp(0.0, 40.0));
-                settings["theme"] = json!(if settings["theme"] == "dark" {
-                    "dark"
-                } else {
-                    "light"
-                });
+                let default_dir = self
+                    .host
+                    .video_dir()
+                    .unwrap_or_else(|| self.root.join("downloads"));
+                sanitize_settings(&mut settings, &default_dir);
                 self.write("settings", &settings)?;
                 Ok(settings)
             }
@@ -1056,5 +972,222 @@ impl Backend {
         Ok(
             json!({"items":items,"hasMore":more,"page":page,"cursor":data["cursor"],"total":data["info"]["media_count"]}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{HeadlessHost, HostFuture};
+    #[derive(Default)]
+    struct ClosingHost {
+        login_closed: AtomicBool,
+    }
+    impl DesktopHost for ClosingHost {
+        fn emit(&self, _: &str, _: Value) {}
+        fn video_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn pick_path(
+            &self,
+            directory: bool,
+            title: &str,
+            extensions: &[&str],
+        ) -> HostFuture<Result<Option<PathBuf>, String>> {
+            HeadlessHost.pick_path(directory, title, extensions)
+        }
+        fn open_login(&self) -> Result<(), String> {
+            HeadlessHost.open_login()
+        }
+        fn close_login(&self) -> Result<(), String> {
+            self.login_closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn window_state(&self, role: WindowRole) -> Result<Value, String> {
+            HeadlessHost.window_state(role)
+        }
+        fn window_action(&self, role: WindowRole, action: &str) -> Result<Value, String> {
+            HeadlessHost.window_action(role, action)
+        }
+    }
+    fn backend() -> (tempfile::TempDir, Arc<Backend>) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend =
+            Arc::new(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).unwrap());
+        (dir, backend)
+    }
+    #[test]
+    fn profile_lock_protects_another_instances_temporary_files() {
+        let (dir, backend) = backend();
+        let file = dir.path().join("private-temp/owned.txt");
+        std::fs::write(&file, b"test").unwrap();
+        assert!(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).is_err());
+        assert!(file.exists());
+        drop(backend);
+        assert!(Backend::new(dir.path().to_owned(), Arc::new(HeadlessHost)).is_ok());
+        assert!(!file.exists());
+    }
+    #[tokio::test]
+    async fn cancelled_cache_hits_fail_without_network() {
+        let (_dir, backend) = backend();
+        backend.play_cache.lock().insert(
+            "BV17x411w7KC:1:80".into(),
+            (Instant::now(), json!({"quality":80})),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(backend
+            .play("BV17x411w7KC", &json!(1), 80, &cancel)
+            .await
+            .is_err());
+    }
+    #[test]
+    fn auth_changes_clear_cache_and_advance_epoch() {
+        let (_dir, backend) = backend();
+        backend
+            .play_cache
+            .lock()
+            .insert("old".into(), (Instant::now(), json!({})));
+        let before = backend.auth_epoch.load(Ordering::SeqCst);
+        backend.invalidate_play();
+        assert!(backend.play_cache.lock().is_empty());
+        assert!(backend.auth_epoch.load(Ordering::SeqCst) > before);
+    }
+    #[tokio::test]
+    async fn concurrent_close_requests_wait_for_the_same_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(ClosingHost::default());
+        let backend = Arc::new(Backend::new(dir.path().to_owned(), host.clone()).unwrap());
+        let added = backend
+            .add_batch("BV17x411w7KC", json!({"folder":dir.path()}))
+            .unwrap();
+        let id = added["added"][0].as_str().unwrap();
+        {
+            let mut queue = backend.queue.lock();
+            let job = queue.jobs.get_mut(id).unwrap();
+            job.started = true;
+            job.finishing = true;
+            job.view.state = "merging".into();
+        }
+        let first = backend.shutdown();
+        tokio::pin!(first);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut first)
+            .await
+            .is_err());
+        let second = backend.shutdown();
+        tokio::pin!(second);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut second)
+            .await
+            .is_err());
+        assert!(!host.login_closed.load(Ordering::SeqCst));
+        {
+            let mut queue = backend.queue.lock();
+            let job = queue.jobs.get_mut(id).unwrap();
+            job.view.state = "completed".into();
+            job.done.send_replace(Some(Ok(json!({"file":"saved"}))));
+        }
+        first.await;
+        second.await;
+        assert!(backend.queue.lock().closing);
+        assert!(host.login_closed.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn dash_cache_reuses_each_available_quality_and_keeps_pages_separate() {
+        let (_dir, b) = backend();
+        let data = json!({"dash":{"video":[{"id":80},{"id":112}]}});
+        b.cache_play("BV1", &json!(1), 127, data.clone(), 0)
+            .unwrap();
+        for qn in [80, 112, 127] {
+            assert_eq!(b.cached_play(&format!("BV1:1:{qn}")), Some(data.clone()));
+        }
+        assert!(b.cached_play("BV1:2:80").is_none());
+        assert!(b.cached_play("BV2:1:80").is_none());
+    }
+    #[test]
+    fn old_auth_results_and_expired_entries_cannot_populate_cache() {
+        let (_dir, b) = backend();
+        b.invalidate_play();
+        assert!(b.cache_play("BV1", &json!(1), 127, json!({}), 0).is_err());
+        assert!(b.play_cache.lock().is_empty());
+        b.play_cache.lock().insert(
+            "expired".into(),
+            (Instant::now() - Duration::from_secs(61), json!({})),
+        );
+        assert!(b.cached_play("expired").is_none());
+        assert!(b.play_cache.lock().is_empty());
+    }
+    #[test]
+    fn cache_is_bounded_and_non_dash_responses_do_not_alias_other_qualities() {
+        let (_dir, b) = backend();
+        b.cache_play("BV1", &json!(1), 80, json!({"accept_quality":[80,112]}), 0)
+            .unwrap();
+        assert!(b.cached_play("BV1:1:112").is_none());
+        for cid in 2..90 {
+            b.cache_play("BV1", &json!(cid), 80, json!({}), 0).unwrap();
+        }
+        assert_eq!(b.play_cache.lock().len(), 64);
+    }
+    #[test]
+    fn public_mode_does_not_read_saved_credentials() {
+        let (dir, backend) = backend();
+        std::fs::write(
+            dir.path().join("external-x.bin"),
+            b"invalid encrypted test data",
+        )
+        .unwrap();
+        assert!(backend.cookie_file("x", "public").unwrap().is_none());
+        assert!(backend.cookies.lock().is_empty());
+    }
+    #[test]
+    fn memory_cookie_and_temporary_cookie_are_removed_separately() {
+        let (dir, backend) = backend();
+        let sample =
+            "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\ttest-only\n";
+        backend.save_cookie("x", sample.into(), false).unwrap();
+        assert!(!dir.path().join("external-x.bin").exists());
+        let file = backend.cookie_file("x", "session").unwrap().unwrap();
+        let path = file.path().to_owned();
+        assert!(path.exists());
+        drop(file);
+        assert!(!path.exists());
+        assert!(backend.cookie("x").unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn guest_account_check_skips_network_and_keeps_play_cache() {
+        let (_dir, backend) = backend();
+        backend
+            .play_cache
+            .lock()
+            .insert("BV1:1:80".into(), (Instant::now(), json!({})));
+        let epoch = backend.auth_epoch.load(Ordering::SeqCst);
+        let profile = backend.account().await;
+        assert_eq!(profile, json!({"logged":false}));
+        assert_eq!(backend.auth_epoch.load(Ordering::SeqCst), epoch);
+        assert_eq!(backend.play_cache.lock().len(), 1);
+    }
+    #[test]
+    fn settings_are_sanitized_on_read() {
+        let (dir, backend) = backend();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            br##"{"color":"red;x","darkColor":"#ABCDEF","mode":"evil","blur":999,"theme":"x","performance":"yes","collapsed":true,"downloadDir":"relative","extra":1}"##,
+        )
+        .unwrap();
+        let s = backend.settings();
+        assert_eq!(s["color"], "#e7ebf2");
+        assert_eq!(s["darkColor"], "#abcdef");
+        assert_eq!(s["mode"], "color");
+        assert_eq!(s["blur"], 40.0);
+        assert_eq!(s["theme"], "light");
+        assert_eq!(s["performance"], false);
+        assert_eq!(s["collapsed"], true);
+        assert_eq!(s["downloadDir"], json!(dir.path().join("downloads")));
+        assert!(s.get("extra").is_none());
+    }
+    #[test]
+    fn remember_removal_failures_are_reported() {
+        let (dir, backend) = backend();
+        std::fs::create_dir(dir.path().join("external-x.bin")).unwrap();
+        assert!(backend.save_cookie("x", "test".into(), false).is_err());
     }
 }

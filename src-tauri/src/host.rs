@@ -6,6 +6,37 @@ use tauri_plugin_dialog::DialogExt;
 pub struct TauriHost {
     pub app: tauri::AppHandle,
 }
+impl TauriHost {
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+/// 窗口在网页绘制前的底色，与当前主题一致，避免深色主题启动时闪白。
+pub fn theme_color(settings: &Value) -> tauri::window::Color {
+    let key = if settings["theme"] == "dark" {
+        "darkColor"
+    } else {
+        "color"
+    };
+    let fallback = if key == "darkColor" {
+        (0x17, 0x1a, 0x24)
+    } else {
+        (0xe7, 0xeb, 0xf2)
+    };
+    let (r, g, b) = settings[key]
+        .as_str()
+        .and_then(|s| s.strip_prefix('#'))
+        .filter(|s| s.len() == 6)
+        .and_then(|s| {
+            Some((
+                u8::from_str_radix(&s[0..2], 16).ok()?,
+                u8::from_str_radix(&s[2..4], 16).ok()?,
+                u8::from_str_radix(&s[4..6], 16).ok()?,
+            ))
+        })
+        .unwrap_or(fallback);
+    tauri::window::Color(r, g, b, 255)
+}
 pub fn local_navigation(url: &tauri::Url) -> bool {
     url.scheme() == "tauri" || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
 }
@@ -45,6 +76,10 @@ impl DesktopHost for TauriHost {
     ) -> HostFuture<Result<Option<PathBuf>, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut builder = self.app.dialog().file().set_title(title);
+        // 以主窗口为父窗口，对话框保持模态，不会被主窗口遮住或重复打开。
+        if let Some(window) = self.app.get_webview_window("main") {
+            builder = builder.set_parent(&window);
+        }
         if !extensions.is_empty() {
             builder = builder.add_filter("文件", extensions);
         }
@@ -78,6 +113,7 @@ impl DesktopHost for TauriHost {
                 tauri::WebviewUrl::App("login.html".into()),
             )
             .title("登录Piku Down")
+            .background_color(theme_color(&settings))
             .inner_size(400.0, 520.0)
             .decorations(false)
             .resizable(false)

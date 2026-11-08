@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Piku Down Tauri",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "identifier": "local.piku.down.tauri",
   "build": {
     "beforeDevCommand": "node scripts/prepare-tauri.cjs",
@@ -19,6 +19,6 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["../resources/icon.ico"],
-    "windows": {"webviewInstallMode":{"type":"downloadBootstrapper","silent":true},"nsis":{"installMode":"currentUser","languages":["SimpChinese","English"],"displayLanguageSelector":true}}
+    "windows": {"webviewInstallMode":{"type":"downloadBootstrapper","silent":true},"nsis":{"installMode":"currentUser","installerIcon":"../resources/icon.ico","languages":["SimpChinese","English"],"displayLanguageSelector":true}}
   }
 }

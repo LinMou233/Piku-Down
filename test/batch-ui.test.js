@@ -41,3 +41,9 @@ test('clearing a finished queue prevents late events from resurrecting removed r
  f.event({taskId:'old',state:'completed',progress:100,revision:5});assert.equal(f.nodes.get('batchList').children.length,0);
  f.event({taskId:'new',revision:7});assert.equal(f.nodes.get('batchList').children.length,1);assert.equal(f.view.model.tasks.has('old'),false);
 });
+test('batch rows show downloaded size when the total is still unknown',async()=>{
+ const f=fixture();await tick();
+ f.event({taskId:'hls',received:52428800,total:0,speed:2097152});
+ const row=f.nodes.get('batchList').children[0];assert.equal(row.children[3].textContent,'正在下载 · 已下载50.0 MB · 2.0MB/s');
+ f.event({taskId:'hls',received:52428800,total:104857600,progress:50,revision:2});assert.equal(row.children[3].textContent,'正在下载 · 50.0% · —');
+});

@@ -470,11 +470,7 @@ impl Backend {
         }
         let published = result.is_ok() && !cancelled && !skipped;
         let warning = if published {
-            [files.warning, cleanup.clone().err()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("；")
+            join_warnings(files.warning, cleanup.clone().err())
         } else {
             String::new()
         };
@@ -500,18 +496,8 @@ impl Backend {
             let revision = q.revision;
             let canonical = {
                 let job = q.jobs.get_mut(&id).unwrap();
-                job.view.state = if published {
-                    "completed"
-                } else if cleanup.is_err() {
-                    "failed"
-                } else if cancelled {
-                    "cancelled"
-                } else if skipped {
-                    "skipped"
-                } else {
-                    "failed"
-                }
-                .into();
+                job.view.state =
+                    final_state(published, cleanup.is_err(), cancelled, skipped).into();
                 job.view.label = match job.view.state.as_str() {
                     "completed" => "下载完成",
                     "cancelled" => "已取消",
@@ -548,6 +534,14 @@ impl Backend {
             q.running = q.running.saturating_sub(1);
             q.jobs[&id].view.clone()
         };
+        if (view.state == "failed" && view.source == "batch")
+            || (view.state == "completed" && !view.error.is_empty())
+        {
+            self.log(&format!(
+                "[task {} {} {}] {}",
+                view.source, view.platform, view.state, view.error
+            ));
+        }
         self.emit("downloadState", json!(view));
         if !published {
             self.emit("progress",json!({"taskId":view.task_id,"source":view.source,"label":view.label,"received":0,"total":0}));
@@ -584,7 +578,17 @@ impl Backend {
             let receiver = job.done.subscribe();
             let cancel = job.task.cancel.clone();
             let queued = !job.started;
-            let view = if queued {
+            let finishing = job.finishing;
+            let view = if !queued && !finishing {
+                // 运行中的任务立即显示取消状态，清理完成后由execute写入最终结果。
+                q.revision += 1;
+                let rev = q.revision;
+                let j = q.jobs.get_mut(&id).unwrap();
+                j.view.label = "正在取消并清理".into();
+                j.view.speed = 0.0;
+                j.view.revision = rev;
+                Some(j.view.clone())
+            } else if queued {
                 q.revision += 1;
                 let rev = q.revision;
                 let j = q.jobs.get_mut(&id).unwrap();
@@ -655,6 +659,32 @@ impl Backend {
         drop(q);
         Ok(self.snapshot())
     }
+}
+/// 任务收尾状态：已发布即完成（清理问题记为警告）；未发布时清理失败优先于取消与跳过。
+fn final_state(
+    published: bool,
+    cleanup_failed: bool,
+    cancelled: bool,
+    skipped: bool,
+) -> &'static str {
+    if published {
+        "completed"
+    } else if cleanup_failed {
+        "failed"
+    } else if cancelled {
+        "cancelled"
+    } else if skipped {
+        "skipped"
+    } else {
+        "failed"
+    }
+}
+fn join_warnings(file_warning: Option<String>, cleanup_error: Option<String>) -> String {
+    [file_warning, cleanup_error]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("；")
 }
 async fn wait(mut receiver: watch::Receiver<Option<DownloadResult>>) -> DownloadResult {
     loop {
@@ -812,6 +842,130 @@ mod tests {
         }
         assert_eq!(pending.await.unwrap()["cancelled"], false);
         assert_eq!(b.queue.lock().jobs[&id].view.state, "completed");
+    }
+    fn mark(b: &Backend, id: &str, started: bool, finishing: bool, state: &str) {
+        let mut q = b.queue.lock();
+        let job = q.jobs.get_mut(id).unwrap();
+        job.started = started;
+        job.finishing = finishing;
+        job.view.state = state.into();
+        if started {
+            q.running += 1;
+        }
+    }
+    fn finish(b: &Backend, id: &str, state: &str, result: DownloadResult) {
+        let mut q = b.queue.lock();
+        let job = q.jobs.get_mut(id).unwrap();
+        job.view.state = state.into();
+        job.done.send_replace(Some(result));
+    }
+    #[tokio::test]
+    async fn cancelling_running_job_shows_cleanup_label_immediately() {
+        let (dir, b) = backend();
+        let r = b
+            .add_batch("BV17x411w7KC", json!({"folder":dir.path()}))
+            .unwrap();
+        let id = r["added"][0].as_str().unwrap().to_owned();
+        mark(&b, &id, true, false, "downloading");
+        let pending = b.cancel(Some(&id));
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        {
+            let q = b.queue.lock();
+            assert_eq!(q.jobs[&id].view.label, "正在取消并清理");
+            assert!(q.jobs[&id].task.cancel.is_cancelled());
+        }
+        finish(&b, &id, "cancelled", Err("下载已取消".into()));
+        assert_eq!(pending.await.unwrap()["cancelled"], true);
+    }
+    #[tokio::test]
+    async fn cancel_all_waits_for_mixed_single_and_batch_jobs_in_every_phase() {
+        let (dir, b) = backend();
+        let r = b
+            .add_batch(
+                "BV17x411w7KC\nhttps://youtu.be/jNQXAC9IVRw",
+                json!({"folder":dir.path()}),
+            )
+            .unwrap();
+        let queued = r["added"][0].as_str().unwrap().to_owned();
+        let running = r["added"][1].as_str().unwrap().to_owned();
+        let single = b
+            .enqueue(
+                "single",
+                "".into(),
+                "bilibili".into(),
+                json!({"folder":dir.path()}),
+                json!({}),
+            )
+            .unwrap();
+        mark(&b, &running, true, false, "downloading");
+        mark(&b, &single, true, true, "merging");
+        let all = b.cancel_all(false);
+        tokio::pin!(all);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut all)
+            .await
+            .is_err());
+        {
+            let q = b.queue.lock();
+            assert_eq!(q.jobs[&queued].view.state, "cancelled");
+            assert!(q.jobs[&running].task.cancel.is_cancelled());
+            // 已进入收尾的任务不会被中止，等待其发布结果。
+            assert!(!q.jobs[&single].task.cancel.is_cancelled());
+        }
+        finish(&b, &running, "cancelled", Err("下载已取消".into()));
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut all)
+            .await
+            .is_err());
+        finish(&b, &single, "completed", Ok(json!({"file":"saved"})));
+        all.await.unwrap();
+        let q = b.queue.lock();
+        assert_eq!(q.jobs[&single].view.state, "completed");
+        assert!(!q.has_work());
+    }
+    #[test]
+    fn lowering_concurrency_waits_for_running_jobs_across_sources() {
+        let (dir, b) = backend();
+        b.add_batch(
+            "BV17x411w7KC\nhttps://youtu.be/jNQXAC9IVRw",
+            json!({"folder":dir.path()}),
+        )
+        .unwrap();
+        let single = b
+            .enqueue(
+                "single",
+                "".into(),
+                "bilibili".into(),
+                json!({"folder":dir.path()}),
+                json!({}),
+            )
+            .unwrap();
+        let mut q = b.queue.lock();
+        q.paused = false;
+        q.concurrency = 1;
+        q.running = 3;
+        assert!(q.dispatchable().is_empty());
+        q.running = 0;
+        assert_eq!(q.dispatchable().len(), 1);
+        q.concurrency = 3;
+        q.paused = true;
+        assert_eq!(q.dispatchable(), vec![single]);
+    }
+    #[test]
+    fn cleanup_problems_become_warnings_only_after_publishing() {
+        assert_eq!(final_state(true, true, false, false), "completed");
+        assert_eq!(final_state(false, true, true, false), "failed");
+        assert_eq!(final_state(false, false, true, true), "cancelled");
+        assert_eq!(final_state(false, false, false, true), "skipped");
+        assert_eq!(final_state(false, false, false, false), "failed");
+        assert_eq!(
+            join_warnings(Some("历史保存失败".into()), Some("暂存清理失败".into())),
+            "历史保存失败；暂存清理失败"
+        );
+        assert_eq!(join_warnings(None, None), "");
     }
     #[test]
     fn simultaneous_submissions_do_not_duplicate_input() {

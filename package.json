@@ -1,6 +1,6 @@
 {
   "name": "piku-down-tauri",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
   "description": "Piku Down Tauri2＋Rust迁移版",
   "license": "MIT",

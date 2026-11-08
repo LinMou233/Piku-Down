@@ -1,4 +1,4 @@
-# Piku Down 1.7.0
+# Piku Down 1.7.1
 
 Windows视频与音频下载工具，支持B站、X（Twitter）与YouTube。1.7.0将主程序迁移至Tauri2＋Rust，保留原有单视频与批次下载界面。
 
@@ -9,6 +9,18 @@ Windows视频与音频下载工具，支持B站、X（Twitter）与YouTube。1.7
 - NTFS保留硬链接快速路径；跨卷与FAT32先完整复制到目标卷的唯一暂存目录，再以不替换目标的方式发布。同名文件不会被覆盖，清理范围限定为当前任务拥有的文件。
 - 重复关闭请求等待同一次任务清理，结束后关闭二维码与主窗口；Windows文件定位改用ShellAPI，打开目录时选中输出文件。
 - 下载组件固定版本并校验SHA256，首次使用时按需下载。主程序缩小不代表媒体组件占用消失。
+
+### 1.7.1修订
+
+- 修复Tauri页面带`http://tauri.localhost`来源导致B站头像被CDN拒绝（403）；访客状态不再请求nav、显示错误或清空解析缓存。
+- 启动失败（如缺少WebView2）与内部错误改为弹窗说明，不再无提示退出；失败的命令与任务写入配置目录下的`piku.log`（不记录Cookie）。
+- 组件失败信息附带yt-dlp／FFmpeg的错误行；取消运行中的任务会立即显示“正在取消并清理”。
+- 窗口移动动效与最大化状态只发给对应窗口；标题栏双击最大化／还原；文件对话框以主窗口为父窗口；窗口底色跟随主题。
+- 设置读写时校验颜色、模式、模糊等取值；已校验组件按大小与修改时间缓存校验结果，不再每次重算SHA256。
+- FAT32目录：超过4GB时提前给出明确提示；不支持硬链接的同卷目录直接以不替换方式改名发布，不再复制一份。启动时清理超过24小时未修改的`.bilidown-`遗留暂存目录。
+- HEVC视频以`hvc1`标记写入MP4，完成提示显示检测到的编码；HEVC／AV1附播放提示。
+- ARM64 FFmpeg改用BtbN月末保留构建（9.0分支），原每日构建约两周后会被删除。
+- YouTube等分段下载（常见于4K／HDR）的进度改读yt-dlp浮点估算值，修复进度条停在0、看似卡住；总大小未知时显示已下载量；分段并发4路下载；仅在yt-dlp开始合并／转封装时才显示“正在处理音视频”。
 
 ## 下载选择
 
@@ -74,14 +86,14 @@ pnpm build:x86
 pnpm build:arm64
 ```
 
-主程序位于对应`target/<target>/release/piku-down.exe`，NSIS安装包位于`release/bundle/nsis`。同时构建3种架构可运行`pnpm build:all`。
+主程序位于对应`target/<target>/release/piku-down.exe`，NSIS安装包位于`target/<target>/release/bundle/nsis`。在Linux上可用`cargo-xwin`交叉编译：`pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc`（需安装nsis、clang、lld与llvm）。同时构建3种架构可运行`pnpm build:all`。
 
 ### 下载组件来源
 
 - [yt-dlp2026.10.21](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.21)。
 - [QuickJS-NG0.17.0与许可](https://github.com/quickjs-ng/quickjs/releases/tag/v0.17.0)。
 - x64／x86的FFmpeg来自[ffmpeg-static](https://github.com/eugeneware/ffmpeg-static/releases)，分别固定b6.1.1与b4.4.1。
-- ARM64的FFmpeg来自[BtbN固定构建](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-01-12-49)，使用GPL构建。组件许可与对应源码见各发行页，主程序不重新分发这些媒体二进制。
+- ARM64的FFmpeg来自[BtbN月末构建](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-30-13-08)的n9.0.2 GPL版（月末构建保留两年）。QuickJS-NG0.17.0没有Windows ARM64构建，ARM64继续使用x86版。组件许可与对应源码见各发行页，主程序不重新分发这些媒体二进制。
 
 组件版本与SHA256在Rust中固定；更新组件时需要一并核对来源、许可与哈希。
 
@@ -106,15 +118,15 @@ JavaScript现只测试实际使用的前端与Tauri桥接，后端回归由Rust�
 
 ## 已知限制与待测
 
-- 队列暂不提供重启恢复或断点续传；强制结束后下载暂存目录可能残留，不保证断电或强制终止后的事务原子性。
-- FAT32仍受单文件大小限制。exFAT与任意网络文件系统尚无本轮实机通过结论。
+- 队列暂不提供重启恢复或断点续传；强制结束后的暂存目录在下次启动时按24小时规则清理，不保证断电或强制终止后的事务原子性。
+- FAT32仍受4GB单文件限制（现会提前提示）。exFAT与网络共享目录的改名发布路径尚无实机通过结论。
 - 15秒媒体看门狗仅检测无新数据停滞，不代表最低速度或总时限；组件请求另设25秒首响应与body无数据超时。
-- MP4保留源编码，可能包含HEVC等编码，播放能力取决于播放器与解码器。
+- MP4保留源编码，可能包含HEVC／AV1等编码（完成时会提示），播放能力取决于播放器与解码器。
 - Windows子进程启动后才加入JobObject，极短时间窗口内的孙进程归属竞态未做故障注入。
 
 - [ ] Windows10 x64实机运行。
 - [ ] Windows10 x86（ia32）与Windows ARM64实机运行，含下载组件组合。
-- [ ] 1.7.0安装、覆盖升级、卸载与安装后完整占用测量。
+- [ ] 1.7.1安装、从1.7.0覆盖升级、卸载与安装后完整占用测量。
 - [ ] 最终成品传输中单项／全部取消、混合单个与批次动态并发、收尾清理警告GUI复验。
 - [ ] exFAT、网络共享目录、异常退出后状态一致性。
 - [ ] B站收藏、稍后再看、全部分P、全部设置项与更多平台账号权限场景的逐项GUI验收。

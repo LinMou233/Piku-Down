@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -48,7 +49,7 @@ pub fn move_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 #[cfg(windows)]
-fn supports_links(path: &Path) -> io::Result<bool> {
+fn volume_info(path: &Path) -> io::Result<(u32, String)> {
     let mut root = vec![0u16; 32768];
     if unsafe { GetVolumePathNameW(wide(path).as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0
     {
@@ -57,6 +58,7 @@ fn supports_links(path: &Path) -> io::Result<bool> {
     let mut flags = 0;
     let mut serial = 0;
     let mut max = 0;
+    let mut name = vec![0u16; 64];
     if unsafe {
         GetVolumeInformationW(
             root.as_ptr(),
@@ -65,14 +67,36 @@ fn supports_links(path: &Path) -> io::Result<bool> {
             &mut serial,
             &mut max,
             &mut flags,
-            std::ptr::null_mut(),
-            0,
+            name.as_mut_ptr(),
+            name.len() as u32,
         )
     } == 0
     {
         return Err(io::Error::last_os_error());
     }
-    Ok(flags & 0x00400000 != 0)
+    let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    Ok((flags, String::from_utf16_lossy(&name[..end])))
+}
+#[cfg(windows)]
+fn supports_links(path: &Path) -> io::Result<bool> {
+    Ok(volume_info(path)?.0 & 0x00400000 != 0)
+}
+pub const FAT32_LIMIT: u64 = u32::MAX as u64;
+pub const FAT32_LIMIT_MESSAGE: &str = "目标目录为FAT32，单个文件不能超过4GB，请改用NTFS或exFAT目录";
+/// 目标目录所在卷的单文件大小上限；目前只识别FAT／FAT32的4GB限制。
+pub fn file_size_limit(directory: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        volume_info(directory)
+            .ok()
+            .filter(|(_, fs)| fs.eq_ignore_ascii_case("FAT32") || fs.eq_ignore_ascii_case("FAT"))
+            .map(|_| FAT32_LIMIT)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = directory;
+        None
+    }
 }
 fn fallback(error: &io::Error, src: &Path, target: &Path) -> bool {
     if !fs::symlink_metadata(src)
@@ -96,6 +120,10 @@ fn fallback(error: &io::Error, src: &Path, target: &Path) -> bool {
         let _ = target;
         matches!(error.raw_os_error(), Some(18 | 95))
     }
+}
+/// 硬链接失败的原因是“卷不支持链接”而不是“跨卷”时，可直接改名发布。
+fn rename_instead_of_copy(error: &io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(1 | 5 | 50 | 267))
 }
 fn copy_checked(src: &Path, dst: &Path, cancel: &CancellationToken) -> io::Result<()> {
     let mut input = fs::File::open(src)?;
@@ -138,10 +166,28 @@ fn publish_inner(
         fs::hard_link(src, target)
     };
     let mut stage = None;
+    let mut on_created = Some(on_created);
     let result = (|| {
         if let Err(error) = direct {
             if !force_copy && !fallback(&error, src, target) {
                 return Err(error);
+            }
+            // 同卷但不支持硬链接（FAT32、部分网络共享）时直接以不替换方式改名，
+            // 避免在目标卷上再复制一份，大文件也不需要双倍空间。
+            if !force_copy && rename_instead_of_copy(&error) {
+                aborted(cancel)?;
+                match move_no_replace(src, target) {
+                    Ok(()) => {
+                        if let Some(created) = on_created.take() {
+                            created();
+                        }
+                        return aborted(cancel);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        return Err(error)
+                    }
+                    Err(_) => (),
+                }
             }
             aborted(cancel)?;
             let directory = tempfile::Builder::new()
@@ -166,7 +212,9 @@ fn publish_inner(
             }
         }
         // 先登记所有权，发布后取消才能准确清理本任务文件。
-        on_created();
+        if let Some(created) = on_created.take() {
+            created();
+        }
         aborted(cancel)?;
         fs::remove_file(src)
     })();
@@ -223,9 +271,89 @@ pub async fn cleanup_owned(
         Ok(())
     }
 }
+fn fresh(path: &Path, max_age: Duration, depth: usize, budget: &mut usize) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return true;
+    };
+    let recent = meta
+        .modified()
+        .ok()
+        .and_then(|time| SystemTime::now().duration_since(time).ok())
+        .is_none_or(|age| age < max_age);
+    if recent {
+        return true;
+    }
+    if !meta.is_dir() || depth == 0 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return true;
+        }
+        *budget -= 1;
+        if fresh(&entry.path(), max_age, depth - 1, budget) {
+            return true;
+        }
+    }
+    false
+}
+/// 清理异常退出后残留的任务暂存目录。只处理folder下直接以.bilidown-开头、
+/// 本身不是链接、且目录与其中内容都超过max_age未修改的目录，返回删除数量。
+pub fn cleanup_stale(folder: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".bilidown-")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+        let mut budget = 2000;
+        if !is_dir || fresh(&path, max_age, 4, &mut budget) {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_cleanup_only_removes_old_task_directories() {
+        let d = test_dir();
+        let stale = d.path().join(".bilidown-old");
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("video"), b"partial").unwrap();
+        fs::create_dir(d.path().join("keep-me")).unwrap();
+        fs::write(d.path().join(".bilidown-file"), b"not a directory").unwrap();
+        assert_eq!(cleanup_stale(d.path(), Duration::from_secs(86400)), 0);
+        assert!(stale.exists());
+        assert_eq!(cleanup_stale(d.path(), Duration::ZERO), 1);
+        assert!(!stale.exists());
+        assert!(d.path().join("keep-me").exists());
+        assert!(d.path().join(".bilidown-file").exists());
+    }
+    #[test]
+    fn rename_fallback_is_limited_to_link_support_errors() {
+        assert!(!rename_instead_of_copy(&io::Error::from_raw_os_error(17)));
+        assert!(!rename_instead_of_copy(&io::Error::from_raw_os_error(183)));
+        assert_eq!(
+            rename_instead_of_copy(&io::Error::from_raw_os_error(1)),
+            cfg!(windows)
+        );
+    }
     fn test_dir() -> tempfile::TempDir {
         match std::env::var_os("PIKU_OUTPUT_TEST_ROOT") {
             Some(root) => tempfile::tempdir_in(root).unwrap(),
